@@ -2,7 +2,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # Auto_Trickstab
-![image](Link_to_your_image)
+![image](https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/dcc29710-c8ad-4560-93d3-c57a717e262c)
+
 
 ## Description
 Detailed description of your Auto Trickstab project.
