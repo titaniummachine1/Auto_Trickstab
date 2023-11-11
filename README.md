@@ -17,7 +17,7 @@ if your lua doesnt work after update consider removing old config data.
 
 first unload lua to save config.
 
-Go to your game properties / local files and then in team fortres 2 folder there is LBOX Auto Trickstab lua folder
+Go to your game properties / local files and then in team fortres 2 folder there is[ " LBOX Auto Trickstab lua " folder
 
 remove it and load lua again
 
