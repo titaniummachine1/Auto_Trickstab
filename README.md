@@ -13,4 +13,4 @@ Detailed description of your Auto Trickstab project.
 [In case of problems Contact me on Telegram](https://t.me/TerminatorMachine)
 
 ## Download
-[![Download Latest](https://img.shields.io/github/downloads/titaniummachine1/Auto_Trickstab/total.svg?style=for-the-badge&logo=download&label=Download%20Latest)](Release_Link)
+[![Download Latest](https://img.shields.io/github/downloads/titaniummachine1/Auto_Trickstab/total.svg?style=for-the-badge&logo=download&label=Download%20Latest)](https://github.com/titaniummachine1/Auto_Trickstab/releases/latest/download/Auto_Trickstab)
