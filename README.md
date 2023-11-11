@@ -12,6 +12,15 @@ automaticly detects posibility of backstabing enemy upon warping behind him
 
 unfortunatly lbox didnt fix warp.triggerwarp() so automatic instakill isnt an option now.
 
+## Menu Fix
+if your lua doesnt work after update consider removing old config data.
+
+first unload lua to save config.
+
+Go to your game properties / local files and then in team fortres 2 folder there is LBOX Auto Trickstab lua folder
+
+remove it and load lua again
+
 [In case of problems Contact me on Telegram](https://t.me/TerminatorMachine)
 
 ## Download
