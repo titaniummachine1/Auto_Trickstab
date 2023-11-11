@@ -6,6 +6,10 @@
 # Auto_Trickstab
 ![image](https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/dcc29710-c8ad-4560-93d3-c57a717e262c)
 
+# featheres
+auto config system(loads and saves config automaticaly)
+auto backstab
+auto walk to backstab oportunity
 
 ## Description
 automaticly detects posibility of backstabing enemy upon warping behind him
