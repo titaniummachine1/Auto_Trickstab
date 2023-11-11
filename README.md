@@ -8,7 +8,9 @@
 
 
 ## Description
-Detailed description of your Auto Trickstab project.
+automaticly detects posibility of backstabing enemy upon warping behind him
+
+unfortunatly lbox didnt fix warp.triggerwarp() so automatic instakill isnt an option now.
 
 [In case of problems Contact me on Telegram](https://t.me/TerminatorMachine)
 
