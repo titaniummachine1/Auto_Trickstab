@@ -127,6 +127,15 @@ local function PositionAngles(source, dest)
     return EulerAngles(pitch, yaw, 0)
 end
 
+-- Calculate angle between two points
+local function PositionAnglesYaw(source, dest)
+    local M_RADPI = 180 / math.pi
+    local delta = source - dest
+    local yaw = math.atan(delta.y / delta.x) * M_RADPI
+    yaw = delta.x >= 0 and yaw + 180 or yaw
+    return EulerAngles(0, yaw, 0)
+end
+
 -- Get the center position of a player's hitbox
 local function GetHitboxPos(player, hitboxID)
     local hitbox = player:GetHitboxes()[hitboxID]
@@ -156,6 +165,19 @@ local pLocalViewPos
 local tickCount = 0
 local pLocal = entities.GetLocalPlayer()
 
+local function GetHitboxForwardDirection(hitbox)
+    if not hitbox then return nil end
+
+    local min, max = hitbox[1], hitbox[2]
+    local dx, dy = max.x - min.x, max.y - min.y
+
+    if math.abs(dx) > math.abs(dy) then
+        return dx > 0 and Vector3(1, 0, 0) or Vector3(-1, 0, 0)
+    else
+        return dy > 0 and Vector3(0, 1, 0) or Vector3(0, -1, 0)
+    end
+end
+
 -- Function to update the cache for the local player and loadout slot
 local function UpdateLocalPlayerCache()
     cachedLocalPlayer = entities.GetLocalPlayer()
@@ -167,6 +189,8 @@ local function UpdatePlayersCache()
     local allPlayers = entities.FindByClass("CTFPlayer")
     for i, player in pairs(allPlayers) do
         if player:GetIndex() ~= cachedLocalPlayer:GetIndex() then
+            local hitbox = player:GetHitboxes()[4] -- Assuming hitboxID 4
+
             cachedPlayers[player:GetIndex()] = {
                 entity = player,
                 isAlive = player:IsAlive(),
@@ -174,8 +198,8 @@ local function UpdatePlayersCache()
                 teamNumber = player:GetTeamNumber(),
                 absOrigin = player:GetAbsOrigin(),
                 viewOffset = player:GetPropVector("localdata", "m_vecViewOffset[0]"),
-                hitboxPos = GetHitboxPos(player, 4),
-                viewAngles = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]") -- Store view angles
+                hitboxPos = hitbox and (hitbox[1] + hitbox[2]) * 0.5,
+                hitboxForward = GetHitboxForwardDirection(hitbox) -- Calculated forward direction
             }
         end
     end
@@ -315,8 +339,8 @@ local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
             local distance = vector.Distance(viewPos, targetPlayer.hitboxPos)
             if distance < BACKSTAB_RANGE then
 
-                local enemyYaw = calculateYaw(targetPlayer.viewAngles.y, targetPlayer.viewAngles.x)
-                local spyYaw = calculateYaw(viewPos.y - targetPlayer.hitboxPos.y, viewPos.x - targetPlayer.hitboxPos.x)
+                local enemyYaw = calculateYaw(targetPlayer.hitboxForward.x, targetPlayer.hitboxForward.y)
+                local spyYaw = PositionAnglesYaw(targetPlayer.hitboxPos, viewPos).yaw
 
                 local yawDifference = math.abs(enemyYaw - spyYaw)
 
@@ -437,6 +461,19 @@ local function WalkTo(userCmd, localPlayer, destination)
     movedir = Vector3(result.x, result.y, 0)
 end
 
+local function CreateSignalFolder()
+    local folderPath = "C:\\gry\\steamapps\\steamapps\\common\\Team Fortress 2\\signals\\signal"
+
+    local success, fullPath = filesystem.CreateDirectory(folderPath)
+    if success then
+        print("Signal folder created at: " .. tostring(fullPath))
+    else
+        print("Error: Unable to create signal folder.")
+    end
+end
+
+-- Call the function to create the signal folder
+CreateSignalFolder()
 
 local allWarps = {}
 local endwarps = {}
