@@ -4,7 +4,8 @@
 ## This script REQUIRES [lnxLib](https://github.com/lnx00/Lmaobox-Library/releases/latest/) and [ImMenu](https://github.com/lnx00/Lmaobox-ImMenu/blob/main/src/ImMenu.lua). It will NOT work without these two luas.
 
 # Auto_Trickstab
-![image](https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/dcc29710-c8ad-4560-93d3-c57a717e262c)
+![image](https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/94dda813-9748-4368-8dbd-bd010cdf5a84)
+
 
 # featheres
 auto config system(loads and saves config automaticaly)
