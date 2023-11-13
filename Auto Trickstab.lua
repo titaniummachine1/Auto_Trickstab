@@ -19,7 +19,7 @@ local Fonts = lnxLib.UI.Fonts
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 1.1, -- dont touch this, this is just for managing the config version
+    Version = 1.2, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -133,18 +133,14 @@ local function PositionAngles(source, dest)
     local M_RADPI = 180 / math.pi
     local delta = source - dest
     local pitch = math.atan(delta.z / delta:Length2D()) * M_RADPI
-    local yaw = math.atan(delta.y / delta.x) * M_RADPI
-    yaw = delta.x >= 0 and yaw + 180 or yaw
-    return EulerAngles(pitch, yaw, 0)
-end
 
--- Calculate angle between two points
-local function PositionAnglesYaw(source, dest)
-    local M_RADPI = 180 / math.pi
-    local delta = source - dest
-    local yaw = math.atan(delta.y / delta.x) * M_RADPI
-    yaw = delta.x >= 0 and yaw + 180 or yaw
-    return yaw
+    -- Calculating yaw
+    local yaw = math.deg(math.atan(delta.y / delta.x))
+    if delta.x < 0 then
+        yaw = yaw + 180
+    end
+
+    return EulerAngles(pitch, yaw, 0)
 end
 
 -- Get the center position of a player's hitbox
@@ -159,22 +155,13 @@ local function NormalizeVector(vec)
     return Vector3(vec.x / length, vec.y / length, vec.z / length)
 end
 
-local function calculateYaw(y, x)
-    local angle = math.atan(y / x)
-    if x < 0 then
-        angle = angle + math.pi -- adjust for 2nd and 3rd quadrants
-    elseif y < 0 then
-        angle = angle + 2 * math.pi -- adjust for 4th quadrant
-    end
-    return EulerAngles(0, angle * (180 / math.pi), 0) -- convert to degrees
-end
-
 local cachedLocalPlayer
 local cachedPlayers = {}
 local cachedLoadoutSlot2
 local pLocalViewPos
 local tickCount = 0
 local pLocal = entities.GetLocalPlayer()
+local vHitbox = { Vector3(-22, -22, 0), Vector3(22, 22, 82) }
 
 local function GetHitboxForwardDirection(hitbox)
     if not hitbox then return nil end
@@ -185,14 +172,25 @@ local function GetHitboxForwardDirection(hitbox)
     -- Calculate yaw angle from corner1 to corner2
     local dy = corner2.y - corner1.y
     local dx = corner2.x - corner1.x
-    local yaw = math.atan(dy, dx)
+    local yaw
+
+    if dx ~= 0 then
+        yaw = math.deg(math.atan(dy / dx))
+    else
+        yaw = dy > 0 and 90 or -90
+    end
+
+    if dx < 0 then
+        yaw = yaw + 180
+    end
 
     -- Adjust yaw by 45 degrees
     local angleDifference = 45 -- degrees
-    yaw = yaw + math.rad(angleDifference)
+    yaw = yaw + angleDifference
 
     -- Convert yaw to direction vector
-    local direction = Vector3(math.cos(yaw), math.sin(yaw), 0)
+    local radianYaw = math.rad(yaw)
+    local direction = Vector3(math.cos(radianYaw), math.sin(radianYaw), 0)
 
     return direction
 end
@@ -273,7 +271,6 @@ local function PredictPlayer(player, simulatedVelocity)
     local gravity = client.GetConVar("sv_gravity")
     local stepSize = player:GetPropFloat("localdata", "m_flStepSize")
     local vUp = Vector3(0, 0, 1)
-    local vHitbox = { Vector3(-20, -20, 0), Vector3(20, 20, 80) }
     local vStep = Vector3(0, 0, stepSize / 2)
 
     positions = {}  -- Store positions for each tick
@@ -333,22 +330,30 @@ local function NormalizeYaw(yaw)
     return yaw
 end
 
--- Calculate the yaw angle between two points
-local function CalculateYawAngle(source, dest)
-    local delta = dest - source
-    local yaw = math.deg(math.atan(delta.y, delta.x))
-    return NormalizeYaw(yaw)
+-- Calculate the yaw angle between two positions
+local function CalculateYawAngle(fromPos, toPos)
+    local delta = toPos - fromPos
+    local angle = math.deg(math.atan(delta.y / delta.x))
+
+    if delta.x < 0 then
+        angle = angle + 180
+    elseif delta.y < 0 then
+        angle = angle + 360
+    end
+
+    return angle
 end
 
--- Check if the yaw difference is within 90 degrees
-local function IsWithin90DegreesFOV(yaw1, yaw2)
-    local difference = math.abs(NormalizeYaw(yaw1 - yaw2))
-    return difference <= 90
+
+-- Check if the angle difference is within 90 degrees FOV
+local function IsWithin90DegreesFOV(angle1, angle2)
+    local difference = NormalizeYaw(angle1 - angle2)
+    return math.abs(difference) <= 90
 end
 
 
 -- Constants
-local BACKSTAB_RANGE = 105  -- Hammer units
+local BACKSTAB_RANGE = 104  -- Hammer units
 local BACKSTAB_ANGLE = 180  -- Degrees in radians for dot product calculation
 
 local BestYawDifference = 0
@@ -376,17 +381,16 @@ local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
         if targetPlayer and targetPlayer.isAlive and not targetPlayer.isDormant and targetPlayer.teamNumber ~= cachedLocalPlayer:GetTeamNumber() then
             local distance = vector.Distance(viewPos, targetPlayer.hitboxPos)
             if distance < BACKSTAB_RANGE then
-                local enemyYaw = CalculateYawAngle(targetPlayer.hitboxPos, targetPlayer.hitboxForward)
+                local enemyYaw = CalculateYawAngle(targetPlayer.absOrigin, targetPlayer.hitboxForward)
                 local spyYaw = CalculateYawAngle(viewPos, targetPlayer.hitboxPos)
-        
+                
                 local yawDifference = math.abs(NormalizeYaw(spyYaw - enemyYaw))
-        
+                
                 if IsWithin90DegreesFOV(spyYaw, enemyYaw) and yawDifference > BestYawDifference then
                     BestYawDifference = yawDifference
                     BestPosition = viewPos
                 end
-        
-                print("Yaw Difference:", yawDifference)
+
                 return IsWithin90DegreesFOV(spyYaw, enemyYaw)
             end
         end
@@ -418,44 +422,38 @@ local function GetBestTarget(me)
     return bestTarget
 end
 
-
-local function SimulateWalkingInDirections(player, target, spread)
+local function SimulateWalkingInDirections(player, target, leftOffset, rightOffset)
     local endPositions = {}
     local playerPos = player:GetAbsOrigin()
     local targetPos = target:GetAbsOrigin()
+    local centralAngle = math.deg(math.atan(targetPos.y - playerPos.y, targetPos.x - playerPos.x))
 
-    local centralDirection = NormalizeVector(targetPos - playerPos)
-    local centralAngle = math.deg(math.atan(centralDirection.y, centralDirection.x))
+    local totalSimulations = Menu.Advanced.Simulations
+    local evenDistribution = totalSimulations % 2 == 0
 
-    local minAngleDiff = Menu.Advanced.SpreadMin  -- Minimum angle difference from 0°
-    local specialOffsets = {-90, 90, 0}  -- Special cases for -90° and 90°
+    -- Special angles for left and right offsets
+    endPositions[centralAngle + leftOffset] = PredictPlayer(player, Vector3(math.cos(math.rad(centralAngle + leftOffset)), math.sin(math.rad(centralAngle + leftOffset)), 0) * MAX_SPEED)
+    endPositions[centralAngle + rightOffset] = PredictPlayer(player, Vector3(math.cos(math.rad(centralAngle + rightOffset)), math.sin(math.rad(centralAngle + rightOffset)), 0) * MAX_SPEED)
 
-    -- Include special offsets first
-    for _, offsetAngle in ipairs(specialOffsets) do
-        local angle = (centralAngle + offsetAngle) % 360
-        local radianAngle = math.rad(angle)
+    -- Include forward direction and adjust simulations
+    local simulationsToDistribute = totalSimulations - 3
+    local angleIncrement = (rightOffset - leftOffset) / (simulationsToDistribute + 1)
+    local currentAngle = centralAngle + leftOffset
+
+    for i = 1, simulationsToDistribute do
+        currentAngle = currentAngle + angleIncrement
+        local radianAngle = math.rad(currentAngle)
         local directionVector = NormalizeVector(Vector3(math.cos(radianAngle), math.sin(radianAngle), 0))
         local simulatedVelocity = directionVector * MAX_SPEED
-        endPositions[angle] = PredictPlayer(player, simulatedVelocity)
+        endPositions[currentAngle] = PredictPlayer(player, simulatedVelocity)
     end
 
-    -- Include forward angle and angles with minimum difference
-    for i = 1, Menu.Advanced.Simulations do
-        local offsetAngle = ((i - 1) / (Menu.Advanced.Simulations - 1)) * spread - (spread / 2)
-        local angle = (centralAngle + offsetAngle) % 360
-
-        if offsetAngle == 0 or (offsetAngle >= minAngleDiff or offsetAngle <= -minAngleDiff) then
-            local radianAngle = math.rad(angle)
-            local directionVector = NormalizeVector(Vector3(math.cos(radianAngle), math.sin(radianAngle), 0))
-            local simulatedVelocity = directionVector * MAX_SPEED
-            endPositions[angle] = PredictPlayer(player, simulatedVelocity)
-        end
+    if not evenDistribution then
+        endPositions[centralAngle] = PredictPlayer(player, Vector3(math.cos(math.rad(centralAngle)), math.sin(math.rad(centralAngle)), 0) * MAX_SPEED)
     end
 
     return endPositions
 end
-
-
 
 -- Computes the move vector between two points
 ---@param userCmd UserCmd
@@ -497,6 +495,54 @@ local function WalkTo(userCmd, localPlayer, destination)
     movedir = Vector3(result.x, result.y, 0)
 end
 
+local function calculateRadiusOfSquare(sideLength)
+    return math.sqrt(2 * (sideLength ^ 2))
+end
+
+-- Function to check if there's a collision between two spheres
+local function checkSphereCollision(center1, radius1, center2, radius2)
+    local distance = vector.Distance(center1, center2)
+    return distance < (radius1 + radius2)
+end
+
+-- Function to calculate the right offset
+local function calculateRightOffset(pLocalPos, targetPos, hitbox)
+    local radius = calculateRadiusOfSquare(24) -- Radius as the diagonal of a 24x24 square
+    local angleIncrement = 1
+    local currentAngle = 0
+    local maxIterations = 360 / angleIncrement
+
+    -- Calculate the initial direction from pLocal to the target
+    local initialDirection = NormalizeVector(targetPos - pLocalPos)
+
+    for i = 1, maxIterations do
+        local radianAngle = math.rad(currentAngle)
+        -- Rotate the initial direction by currentAngle
+        local rotatedDirection = Vector3(
+            initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
+            initialDirection.x * math.sin(radianAngle) + initialDirection.y * math.cos(radianAngle),
+            0
+        )
+        local offsetVector = rotatedDirection * radius * 2
+        local testPos = pLocalPos + offsetVector
+
+        if not checkSphereCollision(testPos, radius, targetPos, radius) then
+            return currentAngle
+        end
+
+        currentAngle = currentAngle + angleIncrement
+    end
+
+
+    if not currentAngle then
+        currentAngle = 50
+    end
+    return currentAngle
+end
+
+
+
+
 local allWarps = {}
 local endwarps = {}
 local TargetGlobalPlayer
@@ -517,7 +563,10 @@ local function OnCreateMove(cmd)
 
     TargetGlobalPlayer = target
 
-    local currentWarps = SimulateWalkingInDirections(pLocal, target, Menu.Advanced.Spread)
+    local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
+    local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
+
+    local currentWarps = SimulateWalkingInDirections(pLocal, target, RightOffst , LeftOffset)
     table.insert(allWarps, currentWarps)
 
     -- Store the 24th tick positions in endwarps
@@ -605,7 +654,7 @@ local function doDraw()
     end
     
 
-        if TargetGlobalPlayer and cachedPlayers and cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxForward then
+        if TargetGlobalPlayer and cachedPlayers and TargetGlobalPlayer and TargetGlobalPlayer:IsValid() then
             local center = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxPos
             local direction = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxForward
             local range = 50 -- Adjust the range of the line as needed
@@ -672,7 +721,7 @@ local function doDraw()
 
         if Menu.tabs.Advanced then
             ImMenu.BeginFrame(1)
-            Menu.Advanced.Simulations = ImMenu.Slider("Simulations", Menu.Advanced.Simulations, 4, 20)
+            Menu.Advanced.Simulations = ImMenu.Slider("Simulations", Menu.Advanced.Simulations, 3, 20)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
