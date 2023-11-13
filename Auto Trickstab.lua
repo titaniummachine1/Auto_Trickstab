@@ -168,15 +168,24 @@ local pLocal = entities.GetLocalPlayer()
 local function GetHitboxForwardDirection(hitbox)
     if not hitbox then return nil end
 
-    local min, max = hitbox[1], hitbox[2]
-    local dx, dy = max.x - min.x, max.y - min.y
+    local corner1 = hitbox[1] -- Assume corner1 is the first corner
+    local corner2 = hitbox[2] -- Assume corner2 is the opposing corner
 
-    if math.abs(dx) > math.abs(dy) then
-        return dx > 0 and Vector3(1, 0, 0) or Vector3(-1, 0, 0)
-    else
-        return dy > 0 and Vector3(0, 1, 0) or Vector3(0, -1, 0)
-    end
+    -- Calculate yaw angle from corner1 to corner2
+    local dy = corner2.y - corner1.y
+    local dx = corner2.x - corner1.x
+    local yaw = math.atan(dy, dx)
+
+    -- Adjust yaw by 45 degrees
+    local angleDifference = 45 -- degrees
+    yaw = yaw + math.rad(angleDifference)
+
+    -- Convert yaw to direction vector
+    local direction = Vector3(math.cos(yaw), math.sin(yaw), 0)
+
+    return direction
 end
+
 
 -- Function to update the cache for the local player and loadout slot
 local function UpdateLocalPlayerCache()
@@ -545,6 +554,8 @@ local function doDraw()
         end
     end
 
+
+
     -- Drawing the 24th tick positions in red
     for angle, point in pairs(endwarps) do
         local screenPos = client.WorldToScreen(Vector3(point.x, point.y, point.z))
@@ -574,7 +585,26 @@ local function doDraw()
             draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
         end
     end
+    
+    for _, playerData in pairs(cachedPlayers) do
+        if playerData.hitboxForward then
+            local center = playerData.absOrigin
+            local direction = playerData.hitboxForward
+            local range = 50 -- Adjust the range of the line as needed
 
+            -- Set the color for the hitbox direction line
+            draw.Color(0, 0, 255, 255) -- Blue color
+
+            local screenPos = client.WorldToScreen(center)
+            if screenPos ~= nil then
+                local endPoint = center + direction * range
+                local screenPos1 = client.WorldToScreen(endPoint)
+                if screenPos1 ~= nil then
+                    draw.Line(screenPos[1], screenPos[2], screenPos1[1], screenPos1[2])
+                end
+            end
+        end
+    end
 
 -----------------------------------------------------------------------------------------------------
                 --Menu
