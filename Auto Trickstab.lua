@@ -19,16 +19,23 @@ local Fonts = lnxLib.UI.Fonts
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
+    Version = 1.1, -- dont touch this, this is just for managing the config version
+
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
+        Advanced = false,
         Visuals = false,
     },
 
     Main = {
         Active = true,  --disable lua
-        AutoWarp = true,
+        TrickstabMode = {"Assistance", "Assistance + Blink", "Auto Blink", "Auto Warp",  "Auto Warp + Auto Blink"},
+        TrickstabModeSelected = 1,
         AutoBackstab = true,
-        AutoWalk = true,
+        AutoWalk = false,
+    },
+
+    Advanced = {
         ColisionCheck = true,
         AdvancedPred = true,
         Simulations = 5,
@@ -113,8 +120,12 @@ end
 
 local status, loadedMenu = pcall(function() return assert(LoadCFG([[LBOX Auto trickstab lua]])) end) --auto laod config
 
-if status then
-    Menu = loadedMenu
+if status then --ensure config is not causing errors
+    if loadedMenu.Version == Menu.Version then
+        Menu = loadedMenu
+    else
+        CreateCFG([[LBOX Auto trickstab lua]], Menu) --saving the config
+    end
 end
 
 -- Calculate angle between two points
@@ -133,7 +144,7 @@ local function PositionAnglesYaw(source, dest)
     local delta = source - dest
     local yaw = math.atan(delta.y / delta.x) * M_RADPI
     yaw = delta.x >= 0 and yaw + 180 or yaw
-    return EulerAngles(0, yaw, 0)
+    return yaw
 end
 
 -- Get the center position of a player's hitbox
@@ -155,7 +166,7 @@ local function calculateYaw(y, x)
     elseif y < 0 then
         angle = angle + 2 * math.pi -- adjust for 4th quadrant
     end
-    return angle * (180 / math.pi) -- convert to degrees
+    return EulerAngles(0, angle * (180 / math.pi), 0) -- convert to degrees
 end
 
 local cachedLocalPlayer
@@ -198,7 +209,7 @@ local function UpdatePlayersCache()
     local allPlayers = entities.FindByClass("CTFPlayer")
     for i, player in pairs(allPlayers) do
         if player:GetIndex() ~= cachedLocalPlayer:GetIndex() then
-            local hitbox = player:GetHitboxes()[4] -- Assuming hitboxID 4
+            local hitbox = player:GetHitboxes()[6] -- Assuming hitboxID 6
 
             cachedPlayers[player:GetIndex()] = {
                 entity = player,
@@ -277,8 +288,8 @@ local function PredictPlayer(player, simulatedVelocity)
         local vel = lastV
         local onGround = lastG
 
-        if Menu.Main.ColisionCheck then
-            if Menu.Main.AdvancedPred then
+        if Menu.Advanced.ColisionCheck then
+            if Menu.Advanced.AdvancedPred then
                 -- Forward collision
                 local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID)
                 if wallTrace.fraction < 1 then
@@ -315,10 +326,28 @@ local function PredictPlayer(player, simulatedVelocity)
     return positions
 end
 
+-- Normalize a yaw angle to the range [-180, 180]
+local function NormalizeYaw(yaw)
+    while yaw > 180 do yaw = yaw - 360 end
+    while yaw < -180 do yaw = yaw + 360 end
+    return yaw
+end
+
+-- Calculate the yaw angle between two points
+local function CalculateYawAngle(source, dest)
+    local delta = dest - source
+    local yaw = math.deg(math.atan(delta.y, delta.x))
+    return NormalizeYaw(yaw)
+end
+
+-- Check if the yaw difference is within 90 degrees
+local function IsWithin90DegreesFOV(yaw1, yaw2)
+    local difference = math.abs(NormalizeYaw(yaw1 - yaw2))
+    return difference <= 90
+end
 
 
 -- Constants
-local NUM_DIRECTIONS = 5
 local BACKSTAB_RANGE = 105  -- Hammer units
 local BACKSTAB_ANGLE = 180  -- Degrees in radians for dot product calculation
 
@@ -347,23 +376,21 @@ local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
         if targetPlayer and targetPlayer.isAlive and not targetPlayer.isDormant and targetPlayer.teamNumber ~= cachedLocalPlayer:GetTeamNumber() then
             local distance = vector.Distance(viewPos, targetPlayer.hitboxPos)
             if distance < BACKSTAB_RANGE then
-
-                local enemyYaw = calculateYaw(targetPlayer.hitboxForward.x, targetPlayer.hitboxForward.y)
-                local spyYaw = PositionAnglesYaw(targetPlayer.hitboxPos, viewPos).yaw
-
-                local yawDifference = math.abs(enemyYaw - spyYaw)
-
-                if yawDifference > BestYawDifference then
+                local enemyYaw = CalculateYawAngle(targetPlayer.hitboxPos, targetPlayer.hitboxForward)
+                local spyYaw = CalculateYawAngle(viewPos, targetPlayer.hitboxPos)
+        
+                local yawDifference = math.abs(NormalizeYaw(spyYaw - enemyYaw))
+        
+                if IsWithin90DegreesFOV(spyYaw, enemyYaw) and yawDifference > BestYawDifference then
                     BestYawDifference = yawDifference
                     BestPosition = viewPos
                 end
-
-                if pLocal:EstimateAbsVelocity():Length() < 150 then return false end
-                return yawDifference > 90
+        
+                print("Yaw Difference:", yawDifference)
+                return IsWithin90DegreesFOV(spyYaw, enemyYaw)
             end
         end
     end
-
     return false
 end
 
@@ -400,7 +427,7 @@ local function SimulateWalkingInDirections(player, target, spread)
     local centralDirection = NormalizeVector(targetPos - playerPos)
     local centralAngle = math.deg(math.atan(centralDirection.y, centralDirection.x))
 
-    local minAngleDiff = Menu.Main.SpreadMin  -- Minimum angle difference from 0°
+    local minAngleDiff = Menu.Advanced.SpreadMin  -- Minimum angle difference from 0°
     local specialOffsets = {-90, 90, 0}  -- Special cases for -90° and 90°
 
     -- Include special offsets first
@@ -413,8 +440,8 @@ local function SimulateWalkingInDirections(player, target, spread)
     end
 
     -- Include forward angle and angles with minimum difference
-    for i = 1, NUM_DIRECTIONS do
-        local offsetAngle = ((i - 1) / (NUM_DIRECTIONS - 1)) * spread - (spread / 2)
+    for i = 1, Menu.Advanced.Simulations do
+        local offsetAngle = ((i - 1) / (Menu.Advanced.Simulations - 1)) * spread - (spread / 2)
         local angle = (centralAngle + offsetAngle) % 360
 
         if offsetAngle == 0 or (offsetAngle >= minAngleDiff or offsetAngle <= -minAngleDiff) then
@@ -470,56 +497,47 @@ local function WalkTo(userCmd, localPlayer, destination)
     movedir = Vector3(result.x, result.y, 0)
 end
 
-local function CreateSignalFolder()
-    local folderPath = "C:\\gry\\steamapps\\steamapps\\common\\Team Fortress 2\\signals\\signal"
-
-    local success, fullPath = filesystem.CreateDirectory(folderPath)
-    if success then
-        print("Signal folder created at: " .. tostring(fullPath))
-    else
-        print("Error: Unable to create signal folder.")
-    end
-end
-
--- Call the function to create the signal folder
-CreateSignalFolder()
-
 local allWarps = {}
 local endwarps = {}
+local TargetGlobalPlayer
 
 local function OnCreateMove(cmd)
     UpdateLocalPlayerCache()  -- Update local player data every tick
     UpdatePlayersCache()  -- Update player data every tick
     BestYawDifference = 0
-    pLocal = entities.GetLocalPlayer()
-    if not pLocal then return end
-
-    NUM_DIRECTIONS = Menu.Main.Simulations - 1  -- Example: 8 directions (N, NE, E, SE, S, SW, W, NW)
     allWarps = {}
     endwarps = {}
-    BackstabOportunity = Vector3(0, 0, 0)
+
+    pLocal = entities.GetLocalPlayer()
+    if not pLocal then return end
 
     -- Store all potential positions in allWarps
     local target = GetBestTarget(cachedLocalPlayer)
     if not target then return end
 
-    local currentWarps = SimulateWalkingInDirections(pLocal, target, Menu.Main.Spread)
+    TargetGlobalPlayer = target
 
+    local currentWarps = SimulateWalkingInDirections(pLocal, target, Menu.Advanced.Spread)
     table.insert(allWarps, currentWarps)
 
-    -- Storing 24th tick positions in endwarps
+    -- Store the 24th tick positions in endwarps
     for angle, positions1 in pairs(currentWarps) do
-        if positions1[24] then
-            endwarps[angle] = positions1[24]
+        local twentyFourthTickPosition = positions1[24]
+        if twentyFourthTickPosition then
+            endwarps[angle] = { twentyFourthTickPosition, false }
         end
     end
+
 
         -- check if any of warp positions can stab anyone
         local lastDistance
         for angle, point in pairs(endwarps) do
-            if CanBackstabFromPosition(cmd, point + Vector3(0, 0, 75), false, target) then
-                BackstabOportunity = BestPosition - Vector3(0,0,75) --the best point
-                WalkTo(cmd, pLocal,  BackstabOportunity)
+            if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
+                endwarps[angle] = {point[1], true}
+
+                if Menu.Main.AutoWalk then
+                    WalkTo(cmd, pLocal, point[1])
+                end
             end
         end
 
@@ -558,21 +576,21 @@ local function doDraw()
 
     -- Drawing the 24th tick positions in red
     for angle, point in pairs(endwarps) do
-        local screenPos = client.WorldToScreen(Vector3(point.x, point.y, point.z))
-        if screenPos then
+        if point[2] == true then
+            draw.Color(255, 255, 255, 255)
+            local screenPos = client.WorldToScreen(Vector3(point[1].x, point[1].y, point[1].z))
+            if screenPos then
+                draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
+            end
+        else
             draw.Color(255, 0, 0, 255)
-            draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
+            local screenPos = client.WorldToScreen(Vector3(point[1].x, point[1].y, point[1].z))
+            if screenPos then
+                draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
+            end
         end
     end
 
-    -- Drawing backstab Position
-    if BackstabOportunity then
-        local screenPos = client.WorldToScreen(Vector3(BackstabOportunity.x, BackstabOportunity.y, BackstabOportunity.z))
-        if screenPos then
-            draw.Color(255, 255, 255, 255)
-            draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
-        end
-    end
 
     local tartpoint = BestPosition
     if startPoint and movedir then
@@ -586,14 +604,14 @@ local function doDraw()
         end
     end
     
-    for _, playerData in pairs(cachedPlayers) do
-        if playerData.hitboxForward then
-            local center = playerData.absOrigin
-            local direction = playerData.hitboxForward
+
+        if TargetGlobalPlayer and cachedPlayers and cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxForward then
+            local center = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxPos
+            local direction = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxForward
             local range = 50 -- Adjust the range of the line as needed
 
             -- Set the color for the hitbox direction line
-            draw.Color(0, 0, 255, 255) -- Blue color
+            draw.Color(0, 255, 0, 255) -- Blue color
 
             local screenPos = client.WorldToScreen(center)
             if screenPos ~= nil then
@@ -604,7 +622,6 @@ local function doDraw()
                 end
             end
         end
-    end
 
 -----------------------------------------------------------------------------------------------------
                 --Menu
@@ -616,41 +633,59 @@ local function doDraw()
         ImMenu.BeginFrame(1) -- tabs
             if ImMenu.Button("Main") then
                 Menu.tabs.Main = true
+                Menu.tabs.Advanced = false
                 Menu.tabs.Visuals = false
             end
     
+            if ImMenu.Button("Advanced") then
+                Menu.tabs.Main = false
+                Menu.tabs.Advanced = true
+                Menu.tabs.Visuals = false
+            end
+
             if ImMenu.Button("Visuals") then
                 Menu.tabs.Main = false
+                Menu.tabs.Advanced = false
                 Menu.tabs.Visuals = true
             end
+
         ImMenu.EndFrame()
     
         if Menu.tabs.Main then
             ImMenu.BeginFrame(1)
             Menu.Main.Active = ImMenu.Checkbox("Active", Menu.Main.Active)
             ImMenu.EndFrame()
+
+            ImMenu.BeginFrame(1)
+                ImMenu.Text("                  Trickstab Modes")
+            ImMenu.EndFrame()
     
             ImMenu.BeginFrame(1)
-            Menu.Main.AutoWarp = ImMenu.Checkbox("Auto Warp", Menu.Main.AutoWarp)
+                Menu.Main.TrickstabModeSelected = ImMenu.Option(Menu.Main.TrickstabModeSelected, Menu.Main.TrickstabMode)
+            ImMenu.EndFrame()
+    
+            ImMenu.BeginFrame(1)
             Menu.Main.AutoBackstab = ImMenu.Checkbox("Auto Backstab", Menu.Main.AutoBackstab)
             Menu.Main.AutoWalk = ImMenu.Checkbox("Auto Walk", Menu.Main.AutoWalk)
             ImMenu.EndFrame()
+        end
 
+        if Menu.tabs.Advanced then
             ImMenu.BeginFrame(1)
-            Menu.Main.Simulations = ImMenu.Slider("Simulations", Menu.Main.Simulations, 4, 20)
+            Menu.Advanced.Simulations = ImMenu.Slider("Simulations", Menu.Advanced.Simulations, 4, 20)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
-            Menu.Main.Spread = ImMenu.Slider("Simulations Max Spread", Menu.Main.Spread, Menu.Main.SpreadMin + 1, 180)
+            Menu.Advanced.Spread = ImMenu.Slider("Simulations Max Spread", Menu.Advanced.Spread, Menu.Advanced.SpreadMin + 1, 180)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
-            Menu.Main.SpreadMin = ImMenu.Slider("Simulations Min Spread", Menu.Main.SpreadMin, 1, Menu.Main.Spread - 1)
+            Menu.Advanced.SpreadMin = ImMenu.Slider("Simulations Min Spread", Menu.Advanced.SpreadMin, 1, Menu.Advanced.Spread - 1)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
-            Menu.Main.ColisionCheck = ImMenu.Checkbox("Colision Check", Menu.Main.ColisionCheck)
-            Menu.Main.AdvancedPred = ImMenu.Checkbox("Advanced Pred", Menu.Main.AdvancedPred)
+            Menu.Advanced.ColisionCheck = ImMenu.Checkbox("Colision Check", Menu.Advanced.ColisionCheck)
+            Menu.Advanced.AdvancedPred = ImMenu.Checkbox("Advanced Pred", Menu.Advanced.AdvancedPred)
             ImMenu.EndFrame()
         end
         
@@ -667,7 +702,6 @@ local function doDraw()
         end
         ImMenu.End()
     end
-    
 end
 
 --[[ Remove the menu when unloaded ]]--
@@ -688,3 +722,18 @@ callbacks.Register("Draw", "AtSM_Draw", doDraw)                               --
 
 --[[ Play sound when loaded ]]--
 client.Command('play "ui/buttonclick"', true) -- Play the "buttonclick" sound when the script is loaded
+
+
+--[[local function CreateSignalFolder()
+    local folderPath = "C:\\gry\\steamapps\\steamapps\\common\\Team Fortress 2\\signals\\signal"
+
+    local success, fullPath = filesystem.CreateDirectory(folderPath)
+    if success then
+        print("Signal folder created at: " .. tostring(fullPath))
+    else
+        print("Error: Unable to create signal folder.")
+    end
+end
+
+-- Call the function to create the signal folder
+CreateSignalFolder()]]
