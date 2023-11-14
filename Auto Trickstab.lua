@@ -361,7 +361,7 @@ local BestPosition
 
 local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
     local weaponReady = cachedLoadoutSlot2 ~= nil
-    if not weaponReady then return false end
+    if not weaponReady or not targetPlayerGlobal then return false end
 
     if real then
         for _, targetPlayer in pairs(cachedPlayers) do
@@ -404,7 +404,7 @@ end
 local function GetBestTarget(me)
     local players = entities.FindByClass("CTFPlayer")
     local bestTarget = nil
-    local maxDistance = 1200  -- 24 ticks into future at speed of 320 units
+    local maxDistance = 117  -- 24 ticks into future at speed of 320 units
 
     for _, player in pairs(players) do
         if player ~= nil and player:IsAlive() and not player:IsDormant()
@@ -488,6 +488,11 @@ local function WalkTo(userCmd, Pos, destination)
     local localPos = Pos
     local result = ComputeMove(userCmd, localPos, destination)
 
+    userCmd:SetButtons(userCmd.buttons & (~IN_FORWARD))
+    userCmd:SetButtons(userCmd.buttons & (~IN_BACK))
+    userCmd:SetButtons(userCmd.buttons & (~IN_LEFT))
+    userCmd:SetButtons(userCmd.buttons & (~IN_RIGHT))
+
     userCmd:SetForwardMove(result.x)
     userCmd:SetSideMove(result.y)
 
@@ -506,17 +511,16 @@ local function checkSphereCollision(center1, radius1, center2, radius2)
 end
 
 -- Function to calculate the right offset
-local function calculateRightOffset(pLocalPos, targetPos, hitbox)
+local function calculateRightOffset(pLocalPos, targetPos)
     local radius = calculateRadiusOfSquare(24) -- Radius as the diagonal of a 24x24 square
-    local angleIncrement = 1
-    local currentAngle = 0
-    local maxIterations = 360 / angleIncrement
+    local angleIncrement = 5
+    local maxIterations = 180 / angleIncrement
 
     -- Calculate the initial direction from pLocal to the target
     local initialDirection = NormalizeVector(targetPos - pLocalPos)
 
     for i = 1, maxIterations do
-        local radianAngle = math.rad(currentAngle)
+        local radianAngle = math.rad(i * angleIncrement)
         -- Rotate the initial direction by currentAngle
         local rotatedDirection = Vector3(
             initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
@@ -527,18 +531,13 @@ local function calculateRightOffset(pLocalPos, targetPos, hitbox)
         local testPos = pLocalPos + offsetVector
 
         if not checkSphereCollision(testPos, radius, targetPos, radius) then
-            return currentAngle
+            return i * angleIncrement
         end
-
-        currentAngle = currentAngle + angleIncrement
     end
 
-
-    if not currentAngle then
-        currentAngle = 50
-    end
-    return currentAngle
+    return nil -- No unobstructed path found
 end
+
 
 local allWarps = {}
 local endwarps = {}
@@ -578,6 +577,7 @@ local function Assistance(cmd, pLocal)
 
                 if Menu.Main.AutoWalk and warp.CanWarp() then
                     WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+                    warp.TriggerWarp()
                 end
             end
         end
@@ -629,7 +629,14 @@ local function OnCreateMove(cmd)
     endwarps = {}
 
     pLocal = entities.GetLocalPlayer()
-    if not pLocal then return end
+    if not pLocal
+    or pLocal:InCond(4) or pLocal:InCond(9)
+    or pLocal:GetPropInt("m_bFeignDeathReady") == 1
+    or not pLocal:GetPropInt("m_iClass") == 8 then return end
+
+    -- Get the local player's active weapon
+    local pWeapon = pLocal:GetPropEntity("m_hActiveWeapon")
+    if not pWeapon or pWeapon:IsMeleeWeapon() == false then return end -- Return if the local player doesn't have an active weaponend
 
     if Menu.Main.AutoBackstab and CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
         cmd:SetButtons(cmd.buttons | IN_ATTACK)  -- Perform backstab
@@ -746,7 +753,7 @@ local function doDraw()
     end
     
 
-        if TargetGlobalPlayer and cachedPlayers and TargetGlobalPlayer and TargetGlobalPlayer:IsValid() then
+        if TargetGlobalPlayer and cachedPlayers and TargetGlobalPlayer and TargetGlobalPlayer:IsValid() and pLocal then
             local center = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxPos
             local direction = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxForward
             local range = 50 -- Adjust the range of the line as needed
@@ -762,17 +769,19 @@ local function doDraw()
                     draw.Line(screenPos[1], screenPos[2], screenPos1[1], screenPos1[2])
                 end
             end
+
+            --[[local screenCenter = client.WorldToScreen(pLocal:GetAbsOrigin())
+            if screenCenter and movedir then
+                local endPoint = pLocal:GetAbsOrigin() + movedir * 1
+                local screenEndPoint = client.WorldToScreen(endPoint)
+                if screenEndPoint then
+                    draw.Color(81, 255, 54, 255)  -- Green color
+                    draw.Line(screenCenter[1], screenCenter[2], screenEndPoint[1], screenEndPoint[2])
+                end
+            end]]
         end
 
-        local screenCenter = client.WorldToScreen(pLocal:GetAbsOrigin())
-        if screenCenter and movedir then
-            local endPoint = pLocal:GetAbsOrigin() + movedir * 1
-            local screenEndPoint = client.WorldToScreen(endPoint)
-            if screenEndPoint then
-                draw.Color(81, 255, 54, 255)  -- Green color
-                draw.Line(screenCenter[1], screenCenter[2], screenEndPoint[1], screenEndPoint[2])
-            end
-        end
+
 
 
 -----------------------------------------------------------------------------------------------------
@@ -812,6 +821,12 @@ local function doDraw()
                 ImMenu.Text("                  Trickstab Modes")
             ImMenu.EndFrame()
     
+            ImMenu.BeginFrame(1)
+                if Menu.Main.TrickstabModeSelected ~= 1 and Menu.Main.TrickstabModeSelected ~= 6 then
+                    ImMenu.Text("                not implemented yet ")
+                end
+            ImMenu.EndFrame()
+            
             ImMenu.BeginFrame(1)
                 Menu.Main.TrickstabModeSelected = ImMenu.Option(Menu.Main.TrickstabModeSelected, Menu.Main.TrickstabMode)
             ImMenu.EndFrame()
