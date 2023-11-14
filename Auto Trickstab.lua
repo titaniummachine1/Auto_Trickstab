@@ -19,7 +19,7 @@ local Fonts = lnxLib.UI.Fonts
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 1.2, -- dont touch this, this is just for managing the config version
+    Version = 1.3, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -29,7 +29,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
 
     Main = {
         Active = true,  --disable lua
-        TrickstabMode = {"Assistance", "Assistance + Blink", "Auto Blink", "Auto Warp",  "Auto Warp + Auto Blink"},
+        TrickstabMode = {"Assistance", "Assistance + Blink", "Auto Blink", "Auto Warp",  "Auto Warp + Auto Blink", "Debug"},
         TrickstabModeSelected = 1,
         AutoBackstab = true,
         AutoWalk = false,
@@ -469,7 +469,7 @@ local function ComputeMove(userCmd, a, b)
     local vSilent = Vector3(x, y, 0)
 
     local ang = vSilent:Angles()
-    local cPitch, cYaw, cRoll = userCmd:GetViewAngles()
+    local cPitch, cYaw, cRoll = engine.GetViewAngles():Unpack()
     local yaw = math.rad(ang.y - cYaw)
     local pitch = math.rad(ang.x - cPitch)
     local move = Vector3(math.cos(yaw) * 320, -math.sin(yaw) * 320, -math.cos(pitch) * 320)
@@ -478,14 +478,14 @@ local function ComputeMove(userCmd, a, b)
 end
 
 -- Global variable to store the move direction
-local movedir = Vector3(0, 0, 0)
+local movedir
 
 -- Walks to the destination and sets the global move direction
 ---@param userCmd UserCmd
 ---@param localPlayer Entity
 ---@param destination Vector3
-local function WalkTo(userCmd, localPlayer, destination)
-    local localPos = localPlayer:GetAbsOrigin()
+local function WalkTo(userCmd, Pos, destination)
+    local localPos = Pos
     local result = ComputeMove(userCmd, localPos, destination)
 
     userCmd:SetForwardMove(result.x)
@@ -540,12 +540,86 @@ local function calculateRightOffset(pLocalPos, targetPos, hitbox)
     return currentAngle
 end
 
-
-
-
 local allWarps = {}
 local endwarps = {}
 local TargetGlobalPlayer
+local global_CMD
+
+local function Assistance(cmd, pLocal)
+    global_CMD = cmd
+
+    pLocal = entities.GetLocalPlayer()
+    -- Store all potential positions in allWarps
+    local target = GetBestTarget(cachedLocalPlayer)
+    if not target then return end
+    TargetGlobalPlayer = target
+
+    local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
+    local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
+
+    local currentWarps = SimulateWalkingInDirections(pLocal, target, RightOffst , LeftOffset)
+    table.insert(allWarps, currentWarps)
+
+        -- Store the 24th tick positions in endwarps
+        for angle, positions1 in pairs(currentWarps) do
+            local twentyFourthTickPosition = positions1[24]
+            if twentyFourthTickPosition then
+                endwarps[angle] = { twentyFourthTickPosition, false }
+            end
+        end
+
+
+        -- check if any of warp positions can stab anyone
+        local lastDistance
+        for angle, point in pairs(endwarps) do
+            if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
+                endwarps[angle] = {point[1], true}
+                --cmd:SetViewAngles(PositionAngles(pLocalViewPos, point[1]):Unpack())
+
+                if Menu.Main.AutoWalk and warp.CanWarp() then
+                    WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+                end
+            end
+        end
+end
+
+local function Debug(cmd, pLocal)
+     -- Store all potential positions in allWarps
+     local target = GetBestTarget(cachedLocalPlayer)
+     if not target then return end
+     TargetGlobalPlayer = target
+ 
+     local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
+     local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
+ 
+     local currentWarps = SimulateWalkingInDirections(pLocal, target, RightOffst , LeftOffset)
+     table.insert(allWarps, currentWarps)
+ 
+     -- Store the 24th tick positions in endwarps
+     for angle, positions1 in pairs(currentWarps) do
+         local twentyFourthTickPosition = positions1[24]
+         if twentyFourthTickPosition then
+             endwarps[angle] = { twentyFourthTickPosition, false }
+         end
+     end
+ 
+ 
+         -- check if any of warp positions can stab anyone
+         local lastDistance
+         for angle, point in pairs(endwarps) do
+             if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
+                 endwarps[angle] = {point[1], true}
+ 
+                 if Menu.Main.AutoWalk then
+                     WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+                 end
+             end
+         end
+ 
+     if CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
+         cmd:SetButtons(cmd.buttons | IN_ATTACK)  -- Perform backstab
+     end
+end
 
 local function OnCreateMove(cmd)
     UpdateLocalPlayerCache()  -- Update local player data every tick
@@ -557,10 +631,27 @@ local function OnCreateMove(cmd)
     pLocal = entities.GetLocalPlayer()
     if not pLocal then return end
 
+    if Menu.Main.AutoBackstab and CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
+        cmd:SetButtons(cmd.buttons | IN_ATTACK)  -- Perform backstab
+    end
+
+    if Menu.Main.TrickstabModeSelected == 1 then
+        Assistance(cmd, pLocal)
+    elseif Menu.Main.TrickstabModeSelected == 2 then
+
+    elseif Menu.Main.TrickstabModeSelected == 3 then
+        
+    elseif Menu.Main.TrickstabModeSelected == 4 then
+
+    elseif Menu.Main.TrickstabModeSelected == 5 then
+
+    elseif Menu.Main.TrickstabModeSelected == 6 then
+        Debug(cmd, pLocal)
+    end
+--[[
     -- Store all potential positions in allWarps
     local target = GetBestTarget(cachedLocalPlayer)
     if not target then return end
-
     TargetGlobalPlayer = target
 
     local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
@@ -592,7 +683,7 @@ local function OnCreateMove(cmd)
 
     if CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
         cmd:SetButtons(cmd.buttons | IN_ATTACK)  -- Perform backstab
-    end
+    end]]
 end
 
 local consolas = draw.CreateFont("Consolas", 17, 500)
@@ -600,6 +691,7 @@ local current_fps = 0
 local function doDraw()
     draw.SetFont(consolas)
     draw.Color(255, 255, 255, 255)
+    pLocal = entities.GetLocalPlayer()
 
     -- update fps every 100 frames
     if globals.FrameCount() % 100 == 0 then
@@ -671,6 +763,17 @@ local function doDraw()
                 end
             end
         end
+
+        local screenCenter = client.WorldToScreen(pLocal:GetAbsOrigin())
+        if screenCenter and movedir then
+            local endPoint = pLocal:GetAbsOrigin() + movedir * 1
+            local screenEndPoint = client.WorldToScreen(endPoint)
+            if screenEndPoint then
+                draw.Color(81, 255, 54, 255)  -- Green color
+                draw.Line(screenCenter[1], screenCenter[2], screenEndPoint[1], screenEndPoint[2])
+            end
+        end
+
 
 -----------------------------------------------------------------------------------------------------
                 --Menu
@@ -753,6 +856,22 @@ local function doDraw()
     end
 end
 
+local function ServerCmdKeyValues()
+    -- check if any of warp positions can stab anyone
+    local lastDistance
+    for angle, point in pairs(endwarps) do
+        if CanBackstabFromPosition(global_CMD, point[1] + Vector3(0, 0, 75), false, target) then
+            endwarps[angle] = {point[1], true}
+            --cmd:SetViewAngles(PositionAngles(pLocalViewPos, point[1]):Unpack())
+
+            if Menu.Main.AutoWalk and warp.CanWarp() and input.IsButtonDown(gui.GetValue("Dash Move Key")) then
+                WalkTo(global_CMD, cachedLocalPlayer:GetAbsOrigin(), point[1])
+            end
+        end
+    end
+
+end
+
 --[[ Remove the menu when unloaded ]]--
 local function OnUnload()                                -- Called when the script is unloaded
     UnloadLib() --unloading lualib
@@ -761,10 +880,13 @@ local function OnUnload()                                -- Called when the scri
 end
 
 --[[ Unregister previous callbacks ]]--
+callbacks.Unregister("ServerCmdKeyValues", "AtSMd_ServerCmdKeyValues")
 callbacks.Unregister("CreateMove", "AtSM_CreateMove")            -- Unregister the "CreateMove" callback
 callbacks.Unregister("Unload", "AtSM_Unload")                    -- Unregister the "Unload" callback
 callbacks.Unregister("Draw", "AtSM_Draw")                        -- Unregister the "Draw" callback
+
 --[[ Register callbacks ]]--
+callbacks.Register("ServerCmdKeyValues", "AtSMd_ServerCmdKeyValues", ServerCmdKeyValues)             -- Register the "CreateMove" callback 
 callbacks.Register("CreateMove", "AtSM_CreateMove", OnCreateMove)             -- Register the "CreateMove" callback
 callbacks.Register("Unload", "AtSM_Unload", OnUnload)                         -- Register the "Unload" callback
 callbacks.Register("Draw", "AtSM_Draw", doDraw)                               -- Register the "Draw" callback
