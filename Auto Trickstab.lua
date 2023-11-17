@@ -19,7 +19,7 @@ local Fonts = lnxLib.UI.Fonts
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 1.3, -- dont touch this, this is just for managing the config version
+    Version = 1.4, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -39,8 +39,6 @@ local Menu = { -- this is the config that will be loaded every time u load the s
         ColisionCheck = true,
         AdvancedPred = true,
         Simulations = 5,
-        Spread = 90,
-        SpreadMin = 10,
     },
 
     Visuals = {
@@ -128,25 +126,29 @@ if status then --ensure config is not causing errors
     end
 end
 
--- Calculate angle between two points
-local function PositionAngles(source, dest)
-    local M_RADPI = 180 / math.pi
-    local delta = source - dest
-    local pitch = math.atan(delta.z / delta:Length2D()) * M_RADPI
 
-    -- Calculating yaw
-    local yaw = math.deg(math.atan(delta.y / delta.x))
-    if delta.x < 0 then
+local M_RADPI = 180 / math.pi
+
+local function isNaN(x) return x ~= x end
+
+-- Calculates the angle between two vectors
+---@param source Vector3
+---@param dest Vector3
+---@return EulerAngles angles
+local function PositionAngles(source, dest)
+    local delta = source - dest
+
+    local pitch = math.atan(delta.z / delta:Length2D()) * M_RADPI
+    local yaw = math.atan(delta.y / delta.x) * M_RADPI
+
+    if delta.x >= 0 then
         yaw = yaw + 180
     end
 
-    return EulerAngles(pitch, yaw, 0)
-end
+    if isNaN(pitch) then pitch = 0 end
+    if isNaN(yaw) then yaw = 0 end
 
--- Get the center position of a player's hitbox
-local function GetHitboxPos(player, hitboxID)
-    local hitbox = player:GetHitboxes()[hitboxID]
-    return hitbox and (hitbox[1] + hitbox[2]) * 0.5 or nil
+    return EulerAngles(pitch, yaw, 0)
 end
 
 -- Normalizes a vector to a unit vector
@@ -163,36 +165,29 @@ local tickCount = 0
 local pLocal = entities.GetLocalPlayer()
 local vHitbox = { Vector3(-22, -22, 0), Vector3(22, 22, 82) }
 
-local function GetHitboxForwardDirection(hitbox)
-    if not hitbox then return nil end
+local function GetHitboxForwardDirection(player)
+    local hitboxes = player:SetupBones()
 
-    local corner1 = hitbox[1] -- Assume corner1 is the first corner
-    local corner2 = hitbox[2] -- Assume corner2 is the opposing corner
+    -- Process only the first hitbox (assuming it has index 0)
+    local boneMatrix = hitboxes[1]
+    if boneMatrix then
+        -- Extract rotation and translation components
+        local rotation = {boneMatrix[1], boneMatrix[2], boneMatrix[3]}
+        local translation = {x = boneMatrix[1][4], y = boneMatrix[2][4], z = boneMatrix[3][4]}
+    
+        -- Assuming boneMatrix[1][1], boneMatrix[2][1], boneMatrix[3][1] represent the forward vector
+        local forward = {x = rotation[1][1], y = rotation[2][1], z = rotation[3][1]}
 
-    -- Calculate yaw angle from corner1 to corner2
-    local dy = corner2.y - corner1.y
-    local dx = corner2.x - corner1.x
-    local yaw
+        -- Rotate the forward vector by 90 degrees around the Z-axis
+        local rotatedForward = {
+            x = -forward.y,  -- x' = -y
+            y = forward.x,   -- y' = x
+            z = forward.z    -- z' = z (no change in z-axis)
+        }
 
-    if dx ~= 0 then
-        yaw = math.deg(math.atan(dy / dx))
-    else
-        yaw = dy > 0 and 90 or -90
+        return rotatedForward
     end
-
-    if dx < 0 then
-        yaw = yaw + 180
-    end
-
-    -- Adjust yaw by 45 degrees
-    local angleDifference = 45 -- degrees
-    yaw = yaw + angleDifference
-
-    -- Convert yaw to direction vector
-    local radianYaw = math.rad(yaw)
-    local direction = Vector3(math.cos(radianYaw), math.sin(radianYaw), 0)
-
-    return direction
+    return nil
 end
 
 
@@ -207,7 +202,7 @@ local function UpdatePlayersCache()
     local allPlayers = entities.FindByClass("CTFPlayer")
     for i, player in pairs(allPlayers) do
         if player:GetIndex() ~= cachedLocalPlayer:GetIndex() then
-            local hitbox = player:GetHitboxes()[6] -- Assuming hitboxID 6
+            local hitbox = player:GetHitboxes()[4] -- Assuming hitboxID 4
 
             cachedPlayers[player:GetIndex()] = {
                 entity = player,
@@ -216,8 +211,8 @@ local function UpdatePlayersCache()
                 teamNumber = player:GetTeamNumber(),
                 absOrigin = player:GetAbsOrigin(),
                 viewOffset = player:GetPropVector("localdata", "m_vecViewOffset[0]"),
-                hitboxPos = hitbox and (hitbox[1] + hitbox[2]) * 0.5,
-                hitboxForward = GetHitboxForwardDirection(hitbox) -- Calculated forward direction
+                hitboxPos = hitbox and (hitbox[1] + hitbox[2]) * 0.5 or nil,
+                hitboxForward = GetHitboxForwardDirection(player) -- Calculated forward direction
             }
         end
     end
@@ -360,16 +355,13 @@ local BestYawDifference = 0
 local BestPosition
 
 local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
-    local weaponReady = cachedLoadoutSlot2 ~= nil
-    if not weaponReady or not targetPlayerGlobal then return false end
-
     if real then
         for _, targetPlayer in pairs(cachedPlayers) do
             if targetPlayer.isAlive and not targetPlayer.isDormant and targetPlayer.teamNumber ~= cachedLocalPlayer:GetTeamNumber() then
                 local distance = vector.Distance(viewPos, targetPlayer.hitboxPos)
                 if distance < BACKSTAB_RANGE then
                     local ang = PositionAngles(viewPos, targetPlayer.hitboxPos)
-                    cmd:SetViewAngles(ang:Unpack())
+                    cmd:SetViewAngles(ang.pitch, ang.yaw, 0) --engine.SetViewAngles(ang) --
                     if cachedLoadoutSlot2:GetPropInt("m_bReadyToBackstab") == 257 then
                         return true
                     end
@@ -381,19 +373,21 @@ local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
         if targetPlayer and targetPlayer.isAlive and not targetPlayer.isDormant and targetPlayer.teamNumber ~= cachedLocalPlayer:GetTeamNumber() then
             local distance = vector.Distance(viewPos, targetPlayer.hitboxPos)
             if distance < BACKSTAB_RANGE then
-                local enemyYaw = CalculateYawAngle(targetPlayer.absOrigin, targetPlayer.hitboxForward)
+                -- Invert the yaw angle by adding 180 degrees
+                local enemyYaw = cachedPlayers[targetPlayerGlobal:GetIndex()].viewOffset.y
+                enemyYaw = NormalizeYaw(enemyYaw + 180)  -- Normalize after adding 180 degrees
+        
                 local spyYaw = CalculateYawAngle(viewPos, targetPlayer.hitboxPos)
-                
+        
                 local yawDifference = math.abs(NormalizeYaw(spyYaw - enemyYaw))
-                
+        
                 if IsWithin90DegreesFOV(spyYaw, enemyYaw) and yawDifference > BestYawDifference then
                     BestYawDifference = yawDifference
                     BestPosition = viewPos
                 end
-
                 return IsWithin90DegreesFOV(spyYaw, enemyYaw)
             end
-        end
+        end        
     end
     return false
 end
@@ -573,11 +567,9 @@ local function Assistance(cmd, pLocal)
         for angle, point in pairs(endwarps) do
             if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
                 endwarps[angle] = {point[1], true}
-                --cmd:SetViewAngles(PositionAngles(pLocalViewPos, point[1]):Unpack())
 
                 if Menu.Main.AutoWalk and warp.CanWarp() then
                     WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
-                    warp.TriggerWarp()
                 end
             end
         end
@@ -608,11 +600,12 @@ local function Debug(cmd, pLocal)
          local lastDistance
          for angle, point in pairs(endwarps) do
              if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
-                 endwarps[angle] = {point[1], true}
+                endwarps[angle] = {point[1], true}
  
-                 if Menu.Main.AutoWalk then
-                     WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
-                 end
+                if Menu.Main.AutoWalk then
+                    WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+                    warp.TriggerWarp()
+                end
              end
          end
  
@@ -655,42 +648,7 @@ local function OnCreateMove(cmd)
     elseif Menu.Main.TrickstabModeSelected == 6 then
         Debug(cmd, pLocal)
     end
---[[
-    -- Store all potential positions in allWarps
-    local target = GetBestTarget(cachedLocalPlayer)
-    if not target then return end
-    TargetGlobalPlayer = target
 
-    local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
-    local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
-
-    local currentWarps = SimulateWalkingInDirections(pLocal, target, RightOffst , LeftOffset)
-    table.insert(allWarps, currentWarps)
-
-    -- Store the 24th tick positions in endwarps
-    for angle, positions1 in pairs(currentWarps) do
-        local twentyFourthTickPosition = positions1[24]
-        if twentyFourthTickPosition then
-            endwarps[angle] = { twentyFourthTickPosition, false }
-        end
-    end
-
-
-        -- check if any of warp positions can stab anyone
-        local lastDistance
-        for angle, point in pairs(endwarps) do
-            if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
-                endwarps[angle] = {point[1], true}
-
-                if Menu.Main.AutoWalk then
-                    WalkTo(cmd, pLocal, point[1])
-                end
-            end
-        end
-
-    if CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
-        cmd:SetButtons(cmd.buttons | IN_ATTACK)  -- Perform backstab
-    end]]
 end
 
 local consolas = draw.CreateFont("Consolas", 17, 500)
@@ -753,7 +711,7 @@ local function doDraw()
     end
     
 
-        if TargetGlobalPlayer and cachedPlayers and TargetGlobalPlayer and TargetGlobalPlayer:IsValid() and pLocal then
+        --[[if TargetGlobalPlayer and cachedPlayers and TargetGlobalPlayer and TargetGlobalPlayer:IsValid() then
             local center = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxPos
             local direction = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxForward
             local range = 50 -- Adjust the range of the line as needed
@@ -770,6 +728,12 @@ local function doDraw()
                 end
             end
 
+            draw.Color(255, 0, 0, 255)
+            local screenPos = client.WorldToScreen(center)
+            if screenPos then
+                draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
+            end
+
             --[[local screenCenter = client.WorldToScreen(pLocal:GetAbsOrigin())
             if screenCenter and movedir then
                 local endPoint = pLocal:GetAbsOrigin() + movedir * 1
@@ -778,9 +742,50 @@ local function doDraw()
                     draw.Color(81, 255, 54, 255)  -- Green color
                     draw.Line(screenCenter[1], screenCenter[2], screenEndPoint[1], screenEndPoint[2])
                 end
-            end]]
-        end
+            end
+        end]]
 
+        local player1 = entities.GetLocalPlayer()
+        local hitboxes = player1:SetupBones(0x7FF00, globals.CurTime())
+        
+        -- Process only the first hitbox (assuming it has index 0)
+        local boneMatrix = hitboxes[1]
+        if boneMatrix then
+            -- Extract rotation and translation components
+            local rotation = {boneMatrix[1], boneMatrix[2], boneMatrix[3]}
+            local translation = {x = boneMatrix[1][4], y = boneMatrix[2][4], z = boneMatrix[3][4]}
+        
+            -- Assuming boneMatrix[1][1], boneMatrix[2][1], boneMatrix[3][1] represent the forward vector
+            local forward = {x = rotation[1][1], y = rotation[2][1], z = rotation[3][1]}
+        
+            -- Normalize the forward vector
+            local length = math.sqrt(forward.x^2 + forward.y^2 + forward.z^2)
+            forward.x = forward.x / length
+            forward.y = forward.y / length
+            forward.z = forward.z / length
+        
+            -- Adjust yaw by 90 degrees
+            local adjustedYaw = math.atan(forward.y, forward.x) + math.rad(90)
+            local adjustedForward = {x = math.cos(adjustedYaw), y = math.sin(adjustedYaw), z = 0}
+        
+            -- Calculate end point of the bone line (representing direction)
+            local lineLength = 50  -- Change length as needed
+            local endPoint = {
+                x = translation.x + adjustedForward.x * lineLength,
+                y = translation.y + adjustedForward.y * lineLength,
+                z = translation.z + adjustedForward.z * lineLength
+            }
+        
+            -- Convert 3D points to screen space
+            local screenStart = client.WorldToScreen(Vector3(translation.x, translation.y, translation.z))
+            local screenEnd = client.WorldToScreen(Vector3(endPoint.x, endPoint.y, endPoint.z))
+        
+            -- Draw line
+            if screenStart and screenEnd then
+                draw.Color(255, 255, 255, 255)  -- White color, change as needed
+                draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
+            end
+        end
 
 
 
@@ -843,14 +848,6 @@ local function doDraw()
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
-            Menu.Advanced.Spread = ImMenu.Slider("Simulations Max Spread", Menu.Advanced.Spread, Menu.Advanced.SpreadMin + 1, 180)
-            ImMenu.EndFrame()
-
-            ImMenu.BeginFrame(1)
-            Menu.Advanced.SpreadMin = ImMenu.Slider("Simulations Min Spread", Menu.Advanced.SpreadMin, 1, Menu.Advanced.Spread - 1)
-            ImMenu.EndFrame()
-
-            ImMenu.BeginFrame(1)
             Menu.Advanced.ColisionCheck = ImMenu.Checkbox("Colision Check", Menu.Advanced.ColisionCheck)
             Menu.Advanced.AdvancedPred = ImMenu.Checkbox("Advanced Pred", Menu.Advanced.AdvancedPred)
             ImMenu.EndFrame()
@@ -871,22 +868,6 @@ local function doDraw()
     end
 end
 
-local function ServerCmdKeyValues()
-    -- check if any of warp positions can stab anyone
-    local lastDistance
-    for angle, point in pairs(endwarps) do
-        if CanBackstabFromPosition(global_CMD, point[1] + Vector3(0, 0, 75), false, target) then
-            endwarps[angle] = {point[1], true}
-            --cmd:SetViewAngles(PositionAngles(pLocalViewPos, point[1]):Unpack())
-
-            if Menu.Main.AutoWalk and warp.CanWarp() and input.IsButtonDown(gui.GetValue("Dash Move Key")) then
-                WalkTo(global_CMD, cachedLocalPlayer:GetAbsOrigin(), point[1])
-            end
-        end
-    end
-
-end
-
 --[[ Remove the menu when unloaded ]]--
 local function OnUnload()                                -- Called when the script is unloaded
     UnloadLib() --unloading lualib
@@ -895,13 +876,11 @@ local function OnUnload()                                -- Called when the scri
 end
 
 --[[ Unregister previous callbacks ]]--
-callbacks.Unregister("ServerCmdKeyValues", "AtSMd_ServerCmdKeyValues")
 callbacks.Unregister("CreateMove", "AtSM_CreateMove")            -- Unregister the "CreateMove" callback
 callbacks.Unregister("Unload", "AtSM_Unload")                    -- Unregister the "Unload" callback
 callbacks.Unregister("Draw", "AtSM_Draw")                        -- Unregister the "Draw" callback
 
 --[[ Register callbacks ]]--
-callbacks.Register("ServerCmdKeyValues", "AtSMd_ServerCmdKeyValues", ServerCmdKeyValues)             -- Register the "CreateMove" callback 
 callbacks.Register("CreateMove", "AtSM_CreateMove", OnCreateMove)             -- Register the "CreateMove" callback
 callbacks.Register("Unload", "AtSM_Unload", OnUnload)                         -- Register the "Unload" callback
 callbacks.Register("Draw", "AtSM_Draw", doDraw)                               -- Register the "Draw" callback
