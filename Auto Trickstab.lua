@@ -21,7 +21,7 @@ local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 1.5, -- dont touch this, this is just for managing the config version
+    Version = 1.6, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -31,8 +31,8 @@ local Menu = { -- this is the config that will be loaded every time u load the s
 
     Main = {
         Active = true,  --disable lua
-        TrickstabMode = {"Assistance", "Assistance + Blink", "Auto Blink", "Auto Warp",  "Auto Warp + Auto Blink", "Debug"},
-        TrickstabModeSelected = 6,
+        TrickstabMode = { "Auto Warp", "Auto Warp + Auto Blink", "Auto Blink", "Assistance", "Assistance + Blink", "Debug"},
+        TrickstabModeSelected = 1,
         AutoBackstab = true,
         AutoWalk = true,
     },
@@ -636,6 +636,38 @@ local function Assistance(cmd, target)
         end
 end
 
+local function AutoWarp(cmd, target)
+    local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
+    local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
+
+    local currentWarps = CalculateTrickstab(pLocal, target, RightOffst , LeftOffset)
+    table.insert(allWarps, currentWarps)
+
+    -- Store the 24th tick positions in endwarps
+    for angle, positions1 in pairs(currentWarps) do
+        local twentyFourthTickPosition = positions1[24]
+        if twentyFourthTickPosition then
+            endwarps[angle] = { twentyFourthTickPosition, false }
+        end
+    end
+
+
+        -- check if any of warp positions can stab anyone
+        local lastDistance
+        for angle, point in pairs(endwarps) do
+            if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
+               endwarps[angle] = {point[1], true}
+
+               if Menu.Main.AutoWalk and warp.CanWarp() then
+                   WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+               end
+
+               if Menu.Advanced.AutoWarp and warp.CanWarp() then
+                   warp.TriggerWarp()
+               end
+            end
+        end
+end
 
 local function Debug(cmd, target)
      local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
@@ -729,15 +761,15 @@ local function OnCreateMove(cmd)
     end
 
     if Menu.Main.TrickstabModeSelected == 1 then
-        Assistance(cmd, target)
+        AutoWarp(cmd, target)
     elseif Menu.Main.TrickstabModeSelected == 2 then
-
+        
     elseif Menu.Main.TrickstabModeSelected == 3 then
         
     elseif Menu.Main.TrickstabModeSelected == 4 then
-
+        Assistance(cmd, target)
     elseif Menu.Main.TrickstabModeSelected == 5 then
-
+        
     elseif Menu.Main.TrickstabModeSelected == 6 then
         Debug(cmd, target)
     end
@@ -918,12 +950,6 @@ local function doDraw()
 
             ImMenu.BeginFrame(1)
                 ImMenu.Text("                  Trickstab Modes")
-            ImMenu.EndFrame()
-    
-            ImMenu.BeginFrame(1)
-                if Menu.Main.TrickstabModeSelected ~= 1 and Menu.Main.TrickstabModeSelected ~= 6 then
-                    ImMenu.Text("                not implemented yet ")
-                end
             ImMenu.EndFrame()
             
             ImMenu.BeginFrame(1)
