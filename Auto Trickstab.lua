@@ -1,25 +1,27 @@
 
 ---@alias AimTarget { entity : Entity, angles : EulerAngles, factor : number }
 
+package.path = package.path .. ";C:\\Users\\Terminatort8000\\AppData\\Local\\?.lua"
+
 ---@type boolean, lnxLib
-local libLoaded, lnxLib = pcall(require, "lnxLib")
-assert(libLoaded, "lnxLib not found, please install it!")
-assert(lnxLib.GetVersion() >= 0.995, "lnxLib version is too old, please update it!")
+local libLoaded, lnxLib = pcall(require, "lnxLib");
+assert(libLoaded, "lnxLib not found, please install it!");
+assert(lnxLib.GetVersion() >= 0.996, "lnxLib version is too old, please update it!");
+
 
 local menuLoaded, ImMenu = pcall(require, "ImMenu")
 assert(menuLoaded, "ImMenu not found, please install it!")
 assert(ImMenu.GetVersion() >= 0.66, "ImMenu version is too old, please update it!")
 
-
 local Math, Conversion = lnxLib.Utils.Math, lnxLib.Utils.Conversion
 local WPlayer, WWeapon = lnxLib.TF2.WPlayer, lnxLib.TF2.WWeapon
 local Helpers = lnxLib.TF2.Helpers
 local Prediction = lnxLib.TF2.Prediction
-local Fonts = lnxLib.UI.Fonts
+local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 1.4, -- dont touch this, this is just for managing the config version
+    Version = 1.5, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -30,15 +32,17 @@ local Menu = { -- this is the config that will be loaded every time u load the s
     Main = {
         Active = true,  --disable lua
         TrickstabMode = {"Assistance", "Assistance + Blink", "Auto Blink", "Auto Warp",  "Auto Warp + Auto Blink", "Debug"},
-        TrickstabModeSelected = 1,
+        TrickstabModeSelected = 6,
         AutoBackstab = true,
-        AutoWalk = false,
+        AutoWalk = true,
     },
 
     Advanced = {
         ColisionCheck = true,
         AdvancedPred = true,
         Simulations = 5,
+        AutoWarp = true,
+        AutoRecharge = true,
     },
 
     Visuals = {
@@ -169,12 +173,11 @@ local function GetHitboxForwardDirection(player)
     local hitboxes = player:SetupBones()
 
     -- Process only the first hitbox (assuming it has index 0)
-    local boneMatrix = hitboxes[1]
+    local boneMatrix = hitboxes[4]
     if boneMatrix then
         -- Extract rotation and translation components
         local rotation = {boneMatrix[1], boneMatrix[2], boneMatrix[3]}
-        local translation = {x = boneMatrix[1][4], y = boneMatrix[2][4], z = boneMatrix[3][4]}
-    
+        
         -- Assuming boneMatrix[1][1], boneMatrix[2][1], boneMatrix[3][1] represent the forward vector
         local forward = {x = rotation[1][1], y = rotation[2][1], z = rotation[3][1]}
 
@@ -185,7 +188,10 @@ local function GetHitboxForwardDirection(player)
             z = forward.z    -- z' = z (no change in z-axis)
         }
 
-        return rotatedForward
+        -- Normalize the rotated vector
+        local length = math.sqrt(rotatedForward.x^2 + rotatedForward.y^2 + rotatedForward.z^2)
+        if length == 0 then return Vector3(0, 0, 0) end
+        return Vector3(rotatedForward.x / length, rotatedForward.y / length, rotatedForward.z / length)
     end
     return nil
 end
@@ -205,6 +211,7 @@ local function UpdatePlayersCache()
             local hitbox = player:GetHitboxes()[4] -- Assuming hitboxID 4
 
             cachedPlayers[player:GetIndex()] = {
+                idx = player:GetIndex(),
                 entity = player,
                 isAlive = player:IsAlive(),
                 isDormant = player:IsDormant(),
@@ -261,7 +268,7 @@ local function handleGroundCollision(vel, groundTrace, vUp)
 end
 
 -- Simulates movement in a specified direction vector for a player over a given number of ticks
-local function PredictPlayer(player, simulatedVelocity)
+local function SimulateWalk(player, simulatedVelocity)
     local tick_interval = globals.TickInterval()
     local gravity = client.GetConVar("sv_gravity")
     local stepSize = player:GetPropFloat("localdata", "m_flStepSize")
@@ -272,7 +279,7 @@ local function PredictPlayer(player, simulatedVelocity)
     local lastP = player:GetAbsOrigin()
     local lastV = simulatedVelocity
     local flags = player:GetPropInt("m_fFlags")
-    local lastG = (flags & FL_ONGROUND == 1)
+    local lastG = (flags & 1 == 1)
 
     for i = 1, SIMULATION_TICKS do
         
@@ -283,13 +290,13 @@ local function PredictPlayer(player, simulatedVelocity)
         if Menu.Advanced.ColisionCheck then
             if Menu.Advanced.AdvancedPred then
                 -- Forward collision
-                local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID)
+                local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
                 if wallTrace.fraction < 1 then
                     pos.x, pos.y = handleForwardCollision(vel, wallTrace, vUp)
                 end
             else
                 -- Forward collision
-                local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID)
+                local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
                 if wallTrace.fraction < 1 then
                     positions[24] = lastP
                     break  -- Exit the loop as collision has occurred
@@ -298,7 +305,7 @@ local function PredictPlayer(player, simulatedVelocity)
 
             -- Ground collision
             local downStep = onGround and vStep or Vector3()
-            local groundTrace = engine.TraceHull(pos + vStep, pos - downStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID)
+            local groundTrace = engine.TraceHull(pos + vStep, pos - downStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
             if groundTrace.fraction < 1 then
                 pos, onGround = handleGroundCollision(vel, groundTrace, vUp)
             else
@@ -325,27 +332,69 @@ local function NormalizeYaw(yaw)
     return yaw
 end
 
--- Calculate the yaw angle between two positions
-local function CalculateYawAngle(fromPos, toPos)
-    local delta = toPos - fromPos
-    local angle = math.deg(math.atan(delta.y / delta.x))
+-- Function to calculate yaw angle between two points
+local function CalculateYawAngle(point1, direction)
+    -- Determine a point along the forward direction
+    local forwardPoint = point1 + direction * 104  -- 'someDistance' is an arbitrary distance
 
-    if delta.x < 0 then
-        angle = angle + 180
-    elseif delta.y < 0 then
-        angle = angle + 360
+    -- Calculate the difference in the x and y coordinates
+    local dx = forwardPoint.x - point1.x
+    local dy = forwardPoint.y - point1.y
+
+    -- Calculate the yaw angle
+    local yaw
+    if dx ~= 0 then
+        yaw = math.atan(dy / dx)
+    else
+        -- Handle the case where dx is 0 to avoid division by zero
+        if dy > 0 then
+            yaw = math.pi / 2  -- 90 degrees
+        else
+            yaw = -math.pi / 2  -- -90 degrees
+        end
     end
 
-    return angle
+    -- Adjust yaw to correct quadrant
+    if dx < 0 then
+        yaw = yaw + math.pi  -- Adjust for second and third quadrants
+    end
+
+    return math.deg(yaw)  -- Convert radians to degrees
+end
+
+local function PositionYaw(source, dest)
+    local delta = dest - source  -- delta vector from source to dest
+
+    local yaw
+    if delta.x ~= 0 then
+        yaw = math.atan(delta.y / delta.x)
+    else
+        -- Handle the case where dx is 0 to avoid division by zero
+        if delta.y > 0 then
+            yaw = math.pi / 2  -- 90 degrees
+        else
+            yaw = -math.pi / 2  -- -90 degrees
+        end
+    end
+
+    -- Adjust yaw to correct quadrant
+    if delta.x < 0 then
+        yaw = yaw + math.pi  -- Adjust for second and third quadrants
+    end
+
+    return math.deg(yaw)  -- Convert radians to degrees
 end
 
 
--- Check if the angle difference is within 90 degrees FOV
 local function IsWithin90DegreesFOV(angle1, angle2)
-    local difference = NormalizeYaw(angle1 - angle2)
-    return math.abs(difference) <= 90
-end
+    local difference = angle1 - angle2
 
+    local normalizedDifference = NormalizeYaw(difference)
+
+    local absoluteDifference = math.abs(normalizedDifference)
+
+    return absoluteDifference <= 90
+end
 
 -- Constants
 local BACKSTAB_RANGE = 104  -- Hammer units
@@ -374,20 +423,20 @@ local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
             local distance = vector.Distance(viewPos, targetPlayer.hitboxPos)
             if distance < BACKSTAB_RANGE then
                 -- Invert the yaw angle by adding 180 degrees
-                local enemyYaw = cachedPlayers[targetPlayerGlobal:GetIndex()].viewOffset.y
-                enemyYaw = NormalizeYaw(enemyYaw + 180)  -- Normalize after adding 180 degrees
-        
-                local spyYaw = CalculateYawAngle(viewPos, targetPlayer.hitboxPos)
-        
+                local enemyYaw = CalculateYawAngle(targetPlayer.hitboxPos, targetPlayer.hitboxForward)
+                enemyYaw = NormalizeYaw(enemyYaw)  -- Normalize
+
+                local spyYaw = PositionYaw(targetPlayer.hitboxPos, viewPos)
+
                 local yawDifference = math.abs(NormalizeYaw(spyYaw - enemyYaw))
-        
+
                 if IsWithin90DegreesFOV(spyYaw, enemyYaw) and yawDifference > BestYawDifference then
                     BestYawDifference = yawDifference
                     BestPosition = viewPos
                 end
                 return IsWithin90DegreesFOV(spyYaw, enemyYaw)
             end
-        end        
+        end
     end
     return false
 end
@@ -398,7 +447,7 @@ end
 local function GetBestTarget(me)
     local players = entities.FindByClass("CTFPlayer")
     local bestTarget = nil
-    local maxDistance = 117  -- 24 ticks into future at speed of 320 units
+    local maxDistance = 220  -- 24 ticks into future at speed of 320 units
 
     for _, player in pairs(players) do
         if player ~= nil and player:IsAlive() and not player:IsDormant()
@@ -416,7 +465,7 @@ local function GetBestTarget(me)
     return bestTarget
 end
 
-local function SimulateWalkingInDirections(player, target, leftOffset, rightOffset)
+local function CalculateTrickstab(player, target, leftOffset, rightOffset)
     local endPositions = {}
     local playerPos = player:GetAbsOrigin()
     local targetPos = target:GetAbsOrigin()
@@ -426,8 +475,8 @@ local function SimulateWalkingInDirections(player, target, leftOffset, rightOffs
     local evenDistribution = totalSimulations % 2 == 0
 
     -- Special angles for left and right offsets
-    endPositions[centralAngle + leftOffset] = PredictPlayer(player, Vector3(math.cos(math.rad(centralAngle + leftOffset)), math.sin(math.rad(centralAngle + leftOffset)), 0) * MAX_SPEED)
-    endPositions[centralAngle + rightOffset] = PredictPlayer(player, Vector3(math.cos(math.rad(centralAngle + rightOffset)), math.sin(math.rad(centralAngle + rightOffset)), 0) * MAX_SPEED)
+    endPositions[centralAngle + leftOffset] = SimulateWalk(player, Vector3(math.cos(math.rad(centralAngle + leftOffset)), math.sin(math.rad(centralAngle + leftOffset)), 0) * MAX_SPEED)
+    endPositions[centralAngle + rightOffset] = SimulateWalk(player, Vector3(math.cos(math.rad(centralAngle + rightOffset)), math.sin(math.rad(centralAngle + rightOffset)), 0) * MAX_SPEED)
 
     -- Include forward direction and adjust simulations
     local simulationsToDistribute = totalSimulations - 3
@@ -439,11 +488,11 @@ local function SimulateWalkingInDirections(player, target, leftOffset, rightOffs
         local radianAngle = math.rad(currentAngle)
         local directionVector = NormalizeVector(Vector3(math.cos(radianAngle), math.sin(radianAngle), 0))
         local simulatedVelocity = directionVector * MAX_SPEED
-        endPositions[currentAngle] = PredictPlayer(player, simulatedVelocity)
+        endPositions[currentAngle] = SimulateWalk(player, simulatedVelocity)
     end
 
     if not evenDistribution then
-        endPositions[centralAngle] = PredictPlayer(player, Vector3(math.cos(math.rad(centralAngle)), math.sin(math.rad(centralAngle)), 0) * MAX_SPEED)
+        endPositions[centralAngle] = SimulateWalk(player, Vector3(math.cos(math.rad(centralAngle)), math.sin(math.rad(centralAngle)), 0) * MAX_SPEED)
     end
 
     return endPositions
@@ -466,7 +515,7 @@ local function ComputeMove(userCmd, a, b)
     local cPitch, cYaw, cRoll = engine.GetViewAngles():Unpack()
     local yaw = math.rad(ang.y - cYaw)
     local pitch = math.rad(ang.x - cPitch)
-    local move = Vector3(math.cos(yaw) * 320, -math.sin(yaw) * 320, -math.cos(pitch) * 320)
+    local move = Vector3(math.cos(yaw) * 302, -math.sin(yaw) * 320, -math.cos(pitch) * 320)
 
     return move
 end
@@ -482,13 +531,14 @@ local function WalkTo(userCmd, Pos, destination)
     local localPos = Pos
     local result = ComputeMove(userCmd, localPos, destination)
 
-    userCmd:SetButtons(userCmd.buttons & (~IN_FORWARD))
-    userCmd:SetButtons(userCmd.buttons & (~IN_BACK))
-    userCmd:SetButtons(userCmd.buttons & (~IN_LEFT))
-    userCmd:SetButtons(userCmd.buttons & (~IN_RIGHT))
+    --userCmd:SetButtons(userCmd.buttons & (~IN_FORWARD))
+    --userCmd:SetButtons(userCmd.buttons & (~IN_BACK))
+    --userCmd:SetButtons(userCmd.buttons & (~IN_LEFT))
+    --userCmd:SetButtons(userCmd.buttons & (~IN_RIGHT))
 
     userCmd:SetForwardMove(result.x)
     userCmd:SetSideMove(result.y)
+    userCmd:SetUpMove(result.z)
 
     -- Set the global move direction
     movedir = Vector3(result.x, result.y, 0)
@@ -504,18 +554,29 @@ local function checkSphereCollision(center1, radius1, center2, radius2)
     return distance < (radius1 + radius2)
 end
 
--- Function to calculate the right offset
-local function calculateRightOffset(pLocalPos, targetPos)
-    local radius = calculateRadiusOfSquare(24) -- Radius as the diagonal of a 24x24 square
-    local angleIncrement = 5
-    local maxIterations = 180 / angleIncrement
+-- Additional helper function to check collision between sphere and AABB
+local function checkSphereAABBCollision(sphereCenter, sphereRadius, aabbMin, aabbMax)
+    local closestPoint = Vector3(
+        math.max(aabbMin.x, math.min(sphereCenter.x, aabbMax.x)),
+        math.max(aabbMin.y, math.min(sphereCenter.y, aabbMax.y)),
+        math.max(aabbMin.z, math.min(sphereCenter.z, aabbMax.z))
+    )
 
-    -- Calculate the initial direction from pLocal to the target
+    local distanceVec = sphereCenter - closestPoint
+    local distanceSq = distanceVec.x^2 + distanceVec.y^2 + distanceVec.z^2
+    return distanceSq < (sphereRadius * sphereRadius)
+end
+
+-- Function to calculate the right offset with additional collision simulation
+local function calculateRightOffset(pLocalPos, targetPos, enemyAABB)
+    local radius = calculateRadiusOfSquare(24)  -- Radius as the diagonal of a 24x24 square
+    local angleIncrement = 5
+    local maxIterations = 360 / angleIncrement
+
     local initialDirection = NormalizeVector(targetPos - pLocalPos)
 
     for i = 1, maxIterations do
         local radianAngle = math.rad(i * angleIncrement)
-        -- Rotate the initial direction by currentAngle
         local rotatedDirection = Vector3(
             initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
             initialDirection.x * math.sin(radianAngle) + initialDirection.y * math.cos(radianAngle),
@@ -525,7 +586,10 @@ local function calculateRightOffset(pLocalPos, targetPos)
         local testPos = pLocalPos + offsetVector
 
         if not checkSphereCollision(testPos, radius, targetPos, radius) then
-            return i * angleIncrement
+            -- Additional collision check with the enemy's AABB
+            if not checkSphereAABBCollision(testPos, radius, enemyAABB[1], enemyAABB[2]) then
+                return i * angleIncrement
+            end
         end
     end
 
@@ -533,24 +597,22 @@ local function calculateRightOffset(pLocalPos, targetPos)
 end
 
 
+
 local allWarps = {}
 local endwarps = {}
 local TargetGlobalPlayer
 local global_CMD
 
-local function Assistance(cmd, pLocal)
+local function Assistance(cmd, target)
     global_CMD = cmd
 
     pLocal = entities.GetLocalPlayer()
     -- Store all potential positions in allWarps
-    local target = GetBestTarget(cachedLocalPlayer)
-    if not target then return end
-    TargetGlobalPlayer = target
 
-    local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
+    local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin())
     local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
 
-    local currentWarps = SimulateWalkingInDirections(pLocal, target, RightOffst , LeftOffset)
+    local currentWarps = CalculateTrickstab(pLocal, target, RightOffst , LeftOffset)
     table.insert(allWarps, currentWarps)
 
         -- Store the 24th tick positions in endwarps
@@ -575,16 +637,12 @@ local function Assistance(cmd, pLocal)
         end
 end
 
-local function Debug(cmd, pLocal)
-     -- Store all potential positions in allWarps
-     local target = GetBestTarget(cachedLocalPlayer)
-     if not target then return end
-     TargetGlobalPlayer = target
- 
+
+local function Debug(cmd, target)
      local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
      local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
  
-     local currentWarps = SimulateWalkingInDirections(pLocal, target, RightOffst , LeftOffset)
+     local currentWarps = CalculateTrickstab(pLocal, target, RightOffst , LeftOffset)
      table.insert(allWarps, currentWarps)
  
      -- Store the 24th tick positions in endwarps
@@ -601,18 +659,43 @@ local function Debug(cmd, pLocal)
          for angle, point in pairs(endwarps) do
              if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
                 endwarps[angle] = {point[1], true}
- 
-                if Menu.Main.AutoWalk then
+
+                if Menu.Main.AutoWalk and warp.CanWarp() then
                     WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+                end
+
+                if Menu.Advanced.AutoWarp and warp.CanWarp() then
                     warp.TriggerWarp()
                 end
              end
          end
- 
-     if CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
-         cmd:SetButtons(cmd.buttons | IN_ATTACK)  -- Perform backstab
-     end
 end
+
+-- Improved timer function to count ticks
+local function createTickCounter()
+    local counter = { ticks = 0, interval = 0 }
+
+    function counter:reset(interval)
+        self.ticks = 0
+        self.interval = interval
+    end
+
+    function counter:update()
+        self.ticks = self.ticks + 1
+        if self.ticks >= self.interval then
+            self.ticks = 0 -- reset counter
+            return true -- interval reached
+        else
+            return false -- interval not yet reached
+        end
+    end
+
+    return counter
+end
+
+-- Create a new tick counter instance
+local warpTickCounter = createTickCounter()
+warpTickCounter:reset(10) -- Set the interval to 10 ticks
 
 local function OnCreateMove(cmd)
     UpdateLocalPlayerCache()  -- Update local player data every tick
@@ -621,22 +704,32 @@ local function OnCreateMove(cmd)
     allWarps = {}
     endwarps = {}
 
+    cmd:SetButtons(cmd.buttons & (~IN_FORWARD))   -- Perform backstab
+
     pLocal = entities.GetLocalPlayer()
     if not pLocal
     or pLocal:InCond(4) or pLocal:InCond(9)
     or pLocal:GetPropInt("m_bFeignDeathReady") == 1
     or not pLocal:GetPropInt("m_iClass") == 8 then return end
 
+    local target = GetBestTarget(cachedLocalPlayer)
+    if target == nil then
+        if Menu.Main.AutoRecharge and not warp.IsWarping() and pLocal:EstimateAbsVelocity():Length() > 100 and warp.GetChargedTicks() < 24 then -- if cannot dt/warp
+            warp.TriggerCharge()
+        end
+    return end
+    TargetGlobalPlayer = target
+
     -- Get the local player's active weapon
     local pWeapon = pLocal:GetPropEntity("m_hActiveWeapon")
     if not pWeapon or pWeapon:IsMeleeWeapon() == false then return end -- Return if the local player doesn't have an active weaponend
 
     if Menu.Main.AutoBackstab and CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
-        cmd:SetButtons(cmd.buttons | IN_ATTACK)  -- Perform backstab
+        cmd:SetButtons(cmd.buttons | IN_ATTACK)   -- Perform backstab
     end
 
     if Menu.Main.TrickstabModeSelected == 1 then
-        Assistance(cmd, pLocal)
+        Assistance(cmd, target)
     elseif Menu.Main.TrickstabModeSelected == 2 then
 
     elseif Menu.Main.TrickstabModeSelected == 3 then
@@ -646,7 +739,7 @@ local function OnCreateMove(cmd)
     elseif Menu.Main.TrickstabModeSelected == 5 then
 
     elseif Menu.Main.TrickstabModeSelected == 6 then
-        Debug(cmd, pLocal)
+        Debug(cmd, target)
     end
 
 end
@@ -745,12 +838,12 @@ local function doDraw()
             end
         end]]
 
-        local player1 = entities.GetLocalPlayer()
-        local hitboxes = player1:SetupBones(0x7FF00, globals.CurTime())
-        
-        -- Process only the first hitbox (assuming it has index 0)
-        local boneMatrix = hitboxes[1]
-        if boneMatrix then
+        if TargetGlobalPlayer then
+            local hitboxes = TargetGlobalPlayer:SetupBones()
+            -- Process only the first hitbox (assuming it has index 0)
+            local boneMatrix = hitboxes[4]
+        end
+        if hitboxes and boneMatrix then
             -- Extract rotation and translation components
             local rotation = {boneMatrix[1], boneMatrix[2], boneMatrix[3]}
             local translation = {x = boneMatrix[1][4], y = boneMatrix[2][4], z = boneMatrix[3][4]}
@@ -792,10 +885,11 @@ local function doDraw()
 -----------------------------------------------------------------------------------------------------
                 --Menu
 
-    if input.IsButtonPressed( KEY_INSERT )then
+    if input.IsButtonPressed( 72 )then
         toggleMenu()
     end
-    if Lbox_Menu_Open == true and ImMenu.Begin("Auto Trickstab", true) then
+
+    if Lbox_Menu_Open == true and ImMenu and ImMenu.Begin("Auto Trickstab", true) then
         ImMenu.BeginFrame(1) -- tabs
             if ImMenu.Button("Main") then
                 Menu.tabs.Main = true
@@ -845,6 +939,11 @@ local function doDraw()
         if Menu.tabs.Advanced then
             ImMenu.BeginFrame(1)
             Menu.Advanced.Simulations = ImMenu.Slider("Simulations", Menu.Advanced.Simulations, 3, 20)
+            ImMenu.EndFrame()
+
+            ImMenu.BeginFrame(1)
+            Menu.Advanced.AutoWarp = ImMenu.Checkbox("Auto Warp", Menu.Advanced.AutoWarp)
+            Menu.Advanced.AutoRecharge = ImMenu.Checkbox("Auto Recharge", Menu.Advanced.AutoRecharge)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
