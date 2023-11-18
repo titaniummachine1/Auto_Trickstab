@@ -503,7 +503,7 @@ end
 ---@param a Vector3
 ---@param b Vector3
 ---@return Vector3
-local function ComputeMove(userCmd, a, b)
+local function ComputeMove(cmd, a, b)
     local diff = (b - a)
     if diff:Length() == 0 then return Vector3(0, 0, 0) end
 
@@ -527,18 +527,17 @@ local movedir
 ---@param userCmd UserCmd
 ---@param localPlayer Entity
 ---@param destination Vector3
-local function WalkTo(userCmd, Pos, destination)
+local function WalkTo(cmd, Pos, destination)
     local localPos = Pos
-    local result = ComputeMove(userCmd, localPos, destination)
+    local result = ComputeMove(cmd, localPos, destination)
 
-    --userCmd:SetButtons(userCmd.buttons & (~IN_FORWARD))
-    --userCmd:SetButtons(userCmd.buttons & (~IN_BACK))
-    --userCmd:SetButtons(userCmd.buttons & (~IN_LEFT))
-    --userCmd:SetButtons(userCmd.buttons & (~IN_RIGHT))
+    cmd:SetButtons(cmd.buttons & (~IN_FORWARD))
+    cmd:SetButtons(cmd.buttons & (~IN_LEFT))
+    cmd:SetButtons(cmd.buttons & (~IN_RIGHT))
 
-    userCmd:SetForwardMove(result.x)
-    userCmd:SetSideMove(result.y)
-    userCmd:SetUpMove(result.z)
+    cmd:SetForwardMove(result.x)
+    cmd:SetSideMove(result.y)
+    --userCmd:SetUpMove(result.z)
 
     -- Set the global move direction
     movedir = Vector3(result.x, result.y, 0)
@@ -704,7 +703,8 @@ local function OnCreateMove(cmd)
     allWarps = {}
     endwarps = {}
 
-    cmd:SetButtons(cmd.buttons & (~IN_FORWARD))   -- Perform backstab
+    --cmd:SetButtons(cmd.buttons & (~IN_JUMP))
+
 
     pLocal = entities.GetLocalPlayer()
     if not pLocal
