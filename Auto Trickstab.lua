@@ -50,6 +50,8 @@ local Menu = { -- this is the config that will be loaded every time u load the s
         VisualizePoints = true,
         VisualizeStabPoint = true,
         VisualizeUsellesSimulations = true,
+        Attack_Circle = true,
+        ForwardLine = false,
     },
 }
 
@@ -398,7 +400,7 @@ end
 
 -- Constants
 local BACKSTAB_RANGE = 104  -- Hammer units
-local BACKSTAB_ANGLE = 180  -- Degrees in radians for dot product calculation
+local BACKSTAB_ANGLE = 177  -- Degrees in radians for dot product calculation
 
 local BestYawDifference = 0
 local BestPosition
@@ -815,6 +817,21 @@ local function OnCreateMove(cmd)
 
 end
 
+    -- Function to check for wall collision and adjust circle points
+    local function CheckCollisionAndAdjustPoint(center, point, radius)
+        -- Perform a trace line from the center to the point
+        local traceResult = engine.TraceLine(center, point, MASK_SOLID)
+
+        -- If the trace hits something before reaching the full radius, adjust the point
+        if traceResult.fraction < 1 then
+            local distanceToWall = radius * traceResult.fraction
+            local direction = NormalizeVector(point - center)
+            return center + direction * distanceToWall
+        end
+
+        return point
+    end
+
 local consolas = draw.CreateFont("Consolas", 17, 500)
 local current_fps = 0
 local function doDraw()
@@ -827,129 +844,102 @@ local function doDraw()
       current_fps = math.floor(1 / globals.FrameTime())
     end
   
-    draw.Text(5, 5, "[lmaobox | fps: " .. current_fps .. "]")
+    draw.Text(5, 5, "[Auto trickstab | fps: " .. current_fps .. "]")
 
-    -- Drawing all simulated positions in green
-    for _, warps in ipairs(allWarps) do
-        for angle, positions in pairs(warps) do
-            for _, point in ipairs(positions) do
-                local screenPos = client.WorldToScreen(Vector3(point.x, point.y, point.z))
-                if screenPos then
-                    draw.Color(0, 255, 0, 255)
-                    draw.FilledRect(screenPos[1] - 2, screenPos[2] - 2, screenPos[1] + 2, screenPos[2] + 2)
+    if Menu.Visuals.Active then
+
+        if Menu.Visuals.VisualizePoints then
+            -- Drawing all simulated positions in green
+            for _, warps in ipairs(allWarps) do
+                for angle, positions in pairs(warps) do
+                    for _, point in ipairs(positions) do
+                        local screenPos = client.WorldToScreen(Vector3(point.x, point.y, point.z))
+                        if screenPos then
+                            draw.Color(0, 255, 0, 255)
+                            draw.FilledRect(screenPos[1] - 2, screenPos[2] - 2, screenPos[1] + 2, screenPos[2] + 2)
+                        end
+                    end
                 end
             end
         end
-    end
 
+        -- Draw the circle with collision detection
+        if Menu.Visuals.Attack_Circle and pLocal then
+            local segments = 32
+            local radius = 104
+            local center = pLocal:GetAbsOrigin()
+            local angleStep = (2 * math.pi) / segments
 
+            for i = 1, segments do
+                local startX = center.x + radius * math.cos(angleStep * (i - 1))
+                local startY = center.y + radius * math.sin(angleStep * (i - 1))
+                local endX = center.x + radius * math.cos(angleStep * i)
+                local endY = center.y + radius * math.sin(angleStep * i)
 
-    -- Drawing the 24th tick positions in red
-    for angle, point in pairs(endwarps) do
-        if point[2] == true then
-            draw.Color(255, 255, 255, 255)
-            local screenPos = client.WorldToScreen(Vector3(point[1].x, point[1].y, point[1].z))
-            if screenPos then
-                draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
-            end
-        else
-            draw.Color(255, 0, 0, 255)
-            local screenPos = client.WorldToScreen(Vector3(point[1].x, point[1].y, point[1].z))
-            if screenPos then
-                draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
-            end
-        end
-    end
+                local startPoint = Vector3(startX, startY, center.z)
+                local endPoint = Vector3(endX, endY, center.z)
 
+                -- Check collision for both start and end points
+                startPoint = CheckCollisionAndAdjustPoint(center, startPoint, radius)
+                endPoint = CheckCollisionAndAdjustPoint(center, endPoint, radius)
 
-    local tartpoint = BestPosition
-    if startPoint and movedir then
-        local endPoint = startPoint + movedir
-        local screenStart = client.WorldToScreen(startPoint)
-        local screenEnd = client.WorldToScreen(endPoint)
+                -- Convert start and end points to screen space
+                local screenStart = client.WorldToScreen(startPoint)
+                local screenEnd = client.WorldToScreen(endPoint)
 
-        if screenStart and screenEnd then
-            draw.Color(255, 0, 0, 255)  -- Red color for line
-            draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
-        end
-    end
-    
-
-        --[[if TargetGlobalPlayer and cachedPlayers and TargetGlobalPlayer and TargetGlobalPlayer:IsValid() then
-            local center = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxPos
-            local direction = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxForward
-            local range = 50 -- Adjust the range of the line as needed
-
-            -- Set the color for the hitbox direction line
-            draw.Color(0, 255, 0, 255) -- Blue color
-
-            local screenPos = client.WorldToScreen(center)
-            if screenPos ~= nil then
-                local endPoint = center + direction * range
-                local screenPos1 = client.WorldToScreen(endPoint)
-                if screenPos1 ~= nil then
-                    draw.Line(screenPos[1], screenPos[2], screenPos1[1], screenPos1[2])
+                -- Draw each line segment
+                if screenStart and screenEnd then
+                    draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
                 end
             end
+        end
 
-            draw.Color(255, 0, 0, 255)
-            local screenPos = client.WorldToScreen(center)
-            if screenPos then
-                draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
-            end
 
-            --[[local screenCenter = client.WorldToScreen(pLocal:GetAbsOrigin())
-            if screenCenter and movedir then
-                local endPoint = pLocal:GetAbsOrigin() + movedir * 1
-                local screenEndPoint = client.WorldToScreen(endPoint)
-                if screenEndPoint then
-                    draw.Color(81, 255, 54, 255)  -- Green color
-                    draw.Line(screenCenter[1], screenCenter[2], screenEndPoint[1], screenEndPoint[2])
+
+        if Menu.Visuals.VisualizeStabPoint then
+            -- Drawing the 24th tick positions in red
+            for angle, point in pairs(endwarps) do
+                if point[2] == true then
+                    draw.Color(255, 255, 255, 255)
+                    local screenPos = client.WorldToScreen(Vector3(point[1].x, point[1].y, point[1].z))
+                    if screenPos then
+                        draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
+                    end
+                else
+                    draw.Color(255, 0, 0, 255)
+                    local screenPos = client.WorldToScreen(Vector3(point[1].x, point[1].y, point[1].z))
+                    if screenPos then
+                        draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
+                    end
                 end
             end
-        end]]
+        end
 
-        if TargetGlobalPlayer then
-            local hitboxes = TargetGlobalPlayer:SetupBones()
-            -- Process only the first hitbox (assuming it has index 0)
-            local boneMatrix = hitboxes[4]
-        end
-        if hitboxes and boneMatrix then
-            -- Extract rotation and translation components
-            local rotation = {boneMatrix[1], boneMatrix[2], boneMatrix[3]}
-            local translation = {x = boneMatrix[1][4], y = boneMatrix[2][4], z = boneMatrix[3][4]}
+        if Menu.Visuals.ForwardLine then
+            if TargetGlobalPlayer then
+                local forward = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxForward
+                local hitboxPos = cachedPlayers[TargetGlobalPlayer:GetIndex()].hitboxPos
+
+                -- Calculate end point of the line in the forward direction
+                local lineLength = 50  -- Length of the line, you can adjust this as needed
+                local endPoint = Vector3(
+                    hitboxPos.x + forward.x * lineLength,
+                    hitboxPos.y + forward.y * lineLength,
+                    hitboxPos.z + forward.z * lineLength
+                )
         
-            -- Assuming boneMatrix[1][1], boneMatrix[2][1], boneMatrix[3][1] represent the forward vector
-            local forward = {x = rotation[1][1], y = rotation[2][1], z = rotation[3][1]}
+                -- Convert 3D points to screen space
+                local screenStart = client.WorldToScreen(hitboxPos)
+                local screenEnd = client.WorldToScreen(endPoint)
         
-            -- Normalize the forward vector
-            local length = math.sqrt(forward.x^2 + forward.y^2 + forward.z^2)
-            forward.x = forward.x / length
-            forward.y = forward.y / length
-            forward.z = forward.z / length
-        
-            -- Adjust yaw by 90 degrees
-            local adjustedYaw = math.atan(forward.y, forward.x) + math.rad(90)
-            local adjustedForward = {x = math.cos(adjustedYaw), y = math.sin(adjustedYaw), z = 0}
-        
-            -- Calculate end point of the bone line (representing direction)
-            local lineLength = 50  -- Change length as needed
-            local endPoint = {
-                x = translation.x + adjustedForward.x * lineLength,
-                y = translation.y + adjustedForward.y * lineLength,
-                z = translation.z + adjustedForward.z * lineLength
-            }
-        
-            -- Convert 3D points to screen space
-            local screenStart = client.WorldToScreen(Vector3(translation.x, translation.y, translation.z))
-            local screenEnd = client.WorldToScreen(Vector3(endPoint.x, endPoint.y, endPoint.z))
-        
-            -- Draw line
-            if screenStart and screenEnd then
-                draw.Color(255, 255, 255, 255)  -- White color, change as needed
-                draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
+                -- Draw line
+                if screenStart and screenEnd then
+                    draw.Color(0, 255, 255, 255)  -- White color, change as needed
+                    draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
+                end
             end
-        end
+        end        
+    end
 
 
 
@@ -1025,7 +1015,11 @@ local function doDraw()
             ImMenu.BeginFrame(1)
             Menu.Visuals.VisualizePoints = ImMenu.Checkbox("Simulations", Menu.Visuals.VisualizePoints)
             Menu.Visuals.VisualizeStabPoint = ImMenu.Checkbox("Stab Points", Menu.Visuals.VisualizeStabPoint)
-            Menu.Visuals.VisualizeUsellesSimulations = ImMenu.Checkbox("Failed Checks", Menu.Visuals.VisualizeUsellesSimulations)
+            ImMenu.EndFrame()
+
+            ImMenu.BeginFrame(1)
+            Menu.Visuals.Attack_Circle = ImMenu.Checkbox("Attack Circle", Menu.Visuals.Attack_Circle)
+            Menu.Visuals.ForwardLine = ImMenu.Checkbox("Forward Line", Menu.Visuals.ForwardLine)
             ImMenu.EndFrame()
         end
         ImMenu.End()
