@@ -21,7 +21,7 @@ local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 1.6, -- dont touch this, this is just for managing the config version
+    Version = 1.7, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -31,7 +31,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
 
     Main = {
         Active = true,  --disable lua
-        TrickstabMode = { "Auto Warp", "Auto Warp + Auto Blink", "Auto Blink", "Assistance", "Assistance + Blink", "Debug"},
+        TrickstabMode = { "Auto Warp + Auto Blink", "Auto Warp", "Auto Blink", "Assistance", "Assistance + Blink", "Debug"},
         TrickstabModeSelected = 1,
         AutoBackstab = true,
         AutoWalk = true,
@@ -532,6 +532,7 @@ local function WalkTo(cmd, Pos, destination)
     local result = ComputeMove(cmd, localPos, destination)
 
     cmd:SetButtons(cmd.buttons & (~IN_FORWARD))
+    cmd:SetButtons(cmd.buttons & (~IN_BACK))
     cmd:SetButtons(cmd.buttons & (~IN_LEFT))
     cmd:SetButtons(cmd.buttons & (~IN_RIGHT))
 
@@ -669,6 +670,42 @@ local function AutoWarp(cmd, target)
         end
 end
 
+local function AutoWarp_AutoBlink(cmd, target)
+    local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
+    local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
+
+    local currentWarps = CalculateTrickstab(pLocal, target, RightOffst , LeftOffset)
+    table.insert(allWarps, currentWarps)
+
+    -- Store the 24th tick positions in endwarps
+    for angle, positions1 in pairs(currentWarps) do
+        local twentyFourthTickPosition = positions1[24]
+        if twentyFourthTickPosition then
+            endwarps[angle] = { twentyFourthTickPosition, false }
+        end
+    end
+
+
+        -- check if any of warp positions can stab anyone
+        local lastDistance
+        for angle, point in pairs(endwarps) do
+            if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
+               endwarps[angle] = {point[1], true}
+
+               if Menu.Main.AutoWalk and warp.CanWarp() then
+                    WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+               elseif Menu.Main.AutoWalk and not warp.CanWarp() and warp.GetChargedTicks() < 1 then
+                    gui.SetValue("fake lag", 1)
+                    WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+               end
+
+               if Menu.Advanced.AutoWarp and warp.CanWarp() then
+                   warp.TriggerWarp()
+               end
+            end
+        end
+end
+
 local function Debug(cmd, target)
      local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), vHitbox)
      local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
@@ -737,7 +774,6 @@ local function OnCreateMove(cmd)
 
     --cmd:SetButtons(cmd.buttons & (~IN_JUMP))
 
-
     pLocal = entities.GetLocalPlayer()
     if not pLocal
     or pLocal:InCond(4) or pLocal:InCond(9)
@@ -746,7 +782,9 @@ local function OnCreateMove(cmd)
 
     local target = GetBestTarget(cachedLocalPlayer)
     if target == nil then
-        if Menu.Main.AutoRecharge and not warp.IsWarping() and pLocal:EstimateAbsVelocity():Length() > 100 and warp.GetChargedTicks() < 24 then -- if cannot dt/warp
+        gui.SetValue("fake lag", 0)
+
+        if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 then -- if cannot dt/warp
             warp.TriggerCharge()
         end
     return end
@@ -758,18 +796,19 @@ local function OnCreateMove(cmd)
 
     if Menu.Main.AutoBackstab and CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
         cmd:SetButtons(cmd.buttons | IN_ATTACK)   -- Perform backstab
+        gui.SetValue("fake lag", 0)
     end
 
     if Menu.Main.TrickstabModeSelected == 1 then
         AutoWarp(cmd, target)
     elseif Menu.Main.TrickstabModeSelected == 2 then
-        
+        AutoWarp_AutoBlink(cmd, target)
     elseif Menu.Main.TrickstabModeSelected == 3 then
         
     elseif Menu.Main.TrickstabModeSelected == 4 then
         Assistance(cmd, target)
     elseif Menu.Main.TrickstabModeSelected == 5 then
-        
+
     elseif Menu.Main.TrickstabModeSelected == 6 then
         Debug(cmd, target)
     end
