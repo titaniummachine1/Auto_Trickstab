@@ -21,7 +21,7 @@ local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 1.8, -- dont touch this, this is just for managing the config version
+    Version = 1.9, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -33,7 +33,6 @@ local Menu = { -- this is the config that will be loaded every time u load the s
         Active = true,  --disable lua
         TrickstabMode = { "Auto Warp + Auto Blink", "Auto Warp", "Auto Blink", "Assistance", "Assistance + Blink", "Debug"},
         TrickstabModeSelected = 1,
-        AutoBackstab = true,
         AutoWalk = true,
         AutoAlign = true,
     },
@@ -139,6 +138,7 @@ local function ManhattanDistance(pos1, pos2)
 end
 
 local M_RADPI = 180 / math.pi
+local changed_Direction = 0
 
 local function isNaN(x) return x ~= x end
 
@@ -177,6 +177,7 @@ local pLocalViewPos
 local tickCount = 0
 local pLocal = entities.GetLocalPlayer()
 local vHitbox = { Vector3(-24, -24, 0), Vector3(24, 24, 82) }
+local TargetGlobalPlayer
 
 local function GetHitboxForwardDirection(player, idx)
     local hitboxes = player:SetupBones()
@@ -435,23 +436,56 @@ local function IsWithin90DegreesFOV(angle1, angle2)
     return absoluteDifference <= 90
 end
 
+
+-- Define function to check InRange between the hitbox and the sphere
+local function checkInRange(targetPos, spherePos, sphereRadius)
+    
+    local hitbox_min = vHitbox[1]
+    local hitbox_max = vHitbox[2]
+    local hitbox_min_trigger = (targetPos + hitbox_min)
+    local hitbox_max_trigger = (targetPos + hitbox_max)
+
+    -- Calculate the closest point on the hitbox to the sphere
+    local closestPoint = Vector3(
+        math.max(hitbox_min_trigger.x, math.min(spherePos.x, hitbox_max_trigger.x)),
+        math.max(hitbox_min_trigger.y, math.min(spherePos.y, hitbox_max_trigger.y)),
+        math.max(hitbox_min_trigger.z, math.min(spherePos.z, hitbox_max_trigger.z))
+    )
+
+    -- Calculate the vector from the closest point to the sphere center
+    local distanceAlongVector = (spherePos - closestPoint):Length()
+    
+    -- Compare the distance along the vector to the sum of the radius
+    if sphereRadius > distanceAlongVector then
+        -- InRange detected (including intersecting)
+        return true, closestPoint
+        
+    else
+        -- No InRange
+        return false, nil
+    end
+end
+
 -- Constants
-local BACKSTAB_RANGE = 97  -- Hammer units
-local BACKSTAB_ANGLE = 175  -- Degrees in radians for dot product calculation
+local BACKSTAB_RANGE = 66  -- Hammer units
+local BACKSTAB_ANGLE = 160  -- Degrees in radians for dot product calculation
 
 local BestYawDifference = 180
 local BestPosition
 local AlignPos = nil
 
 -- Updated function with Manhattan Distance
-local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
+local function CanBackstabFromPosition(cmd, viewPos, real, targetGlobalPlayer)
     if real then
         for _, targetPlayer in pairs(cachedPlayers) do
             if targetPlayer.isAlive and not targetPlayer.isDormant and targetPlayer.teamNumber ~= cachedLocalPlayer:GetTeamNumber() then
                 local distance = ManhattanDistance(viewPos, targetPlayer.hitboxPos)
                 if distance < BACKSTAB_RANGE then
-                    local ang = PositionAngles(viewPos, targetPlayer.hitboxPos)
-                    cmd:SetViewAngles(ang.pitch, ang.yaw, 0)
+                    if cachedLoadoutSlot2:GetPropInt("m_bReadyToBackstab") == 257 then
+                        return true
+                    end
+                    local angle1 = PositionAngles(viewPos, targetPlayer.hitboxPos)
+                    --cmd:SetViewAngles(angle1.pitch, angle1.yaw, 0)
                     if cachedLoadoutSlot2:GetPropInt("m_bReadyToBackstab") == 257 then
                         return true
                     end
@@ -459,23 +493,27 @@ local function CanBackstabFromPosition(cmd, viewPos, real, targetPlayerGlobal)
             end
         end
     else
-         local targetPlayer = cachedPlayers[targetPlayerGlobal:GetIndex()]
+        local targetPlayer = cachedPlayers[targetGlobalPlayer:GetIndex()]
         if targetPlayer and targetPlayer.isAlive and not targetPlayer.isDormant and targetPlayer.teamNumber ~= cachedLocalPlayer:GetTeamNumber() then
             local distance = ManhattanDistance(viewPos, targetPlayer.hitboxPos)
-            if distance < BACKSTAB_RANGE then
-                -- Invert the yaw angle by adding 180 degrees
-                local enemyYaw = CalculateYawAngle(targetPlayer.hitboxPos, targetPlayer.hitboxForward)
-                enemyYaw = NormalizeYaw(enemyYaw)  -- Normalize
+            if distance < 220 then
+                InRange, InRangePoint = checkInRange(targetPlayer.absOrigin, viewPos, 66)
+                if InRange then
+                    -- Check for InRange with current position
+                    
+                    local enemyYaw = CalculateYawAngle(targetPlayer.hitboxPos, targetPlayer.hitboxForward)
+                    enemyYaw = NormalizeYaw(enemyYaw)  -- Normalize
 
-                local spyYaw = PositionYaw(targetPlayer.hitboxPos, viewPos)
+                    local spyYaw = PositionYaw(targetPlayer.absOrigin, viewPos)
 
-                local yawDifference = math.abs(NormalizeYaw(spyYaw - enemyYaw))
+                    local yawDifference = math.abs(NormalizeYaw(spyYaw - enemyYaw))
 
-                if IsWithin90DegreesFOV(spyYaw, enemyYaw) and yawDifference > BestYawDifference then
-                    BestYawDifference = yawDifference
-                    BestPosition = viewPos
+                    if IsWithin90DegreesFOV(spyYaw, enemyYaw) and yawDifference > BestYawDifference then
+                        BestYawDifference = yawDifference
+                        BestPosition = viewPos
+                    end
+                    return IsWithin90DegreesFOV(spyYaw, enemyYaw), InRange
                 end
-                return IsWithin90DegreesFOV(spyYaw, enemyYaw)
             end
         end
         if BestPosition == nil then
@@ -516,6 +554,10 @@ local function CalculateTrickstab(player, target, leftOffset, rightOffset, forwa
     local playerPos = player:GetAbsOrigin()
     local targetPos = target:GetAbsOrigin()
     local centralAngle = math.deg(math.atan(targetPos.y - playerPos.y, targetPos.x - playerPos.x))
+    local Disguised = player:InCond(TFCond_Disguised)
+    if Disguised then
+        MAX_SPEED = player:EstimateAbsVelocity():Length()
+    end
 
     local totalSimulations = Menu.Advanced.Simulations
     local evenDistribution = totalSimulations % 2 == 0
@@ -570,7 +612,7 @@ local function ComputeMove(cmd, a, b)
     local cPitch, cYaw, cRoll = engine.GetViewAngles():Unpack()
     local yaw = math.rad(ang.y - cYaw)
     local pitch = math.rad(ang.x - cPitch)
-    local move = Vector3(math.cos(yaw) * 302, -math.sin(yaw) * 320, -math.cos(pitch) * 320)
+    local move = Vector3(math.cos(yaw) * 320, -math.sin(yaw) * 320, 0)
 
     return move
 end
@@ -578,26 +620,84 @@ end
 -- Global variable to store the move direction
 local movedir
 
+-- Normalize an angle to the range -180 to 180
+---@param angle number
+---@return number
+local function NormalizeAngle(angle)
+    while angle > 180 do angle = angle - 360 end
+    while angle < -180 do angle = angle + 360 end
+    return angle
+end
+
 -- Walks to the destination and sets the global move direction
 ---@param userCmd UserCmd
 ---@param localPlayer Entity
 ---@param destination Vector3
 local function WalkTo(cmd, Pos, destination)
-    local localPos = Pos
-    local result = ComputeMove(cmd, localPos, destination)
+    
+        local canBackstab, inrange = CanBackstabFromPosition(cmd, plocalAbsOrigin, false, TargetGlobalPlayer)
+        print(true)
+        if not canBackstab then
+                -- Adjust yaw angle based on movement keys
+                local yawAdjustment = 0
+                if input.IsButtonDown(KEY_W) then
+                    yawAdjustment = 0  -- Forward
+                    if input.IsButtonDown(KEY_A) then
+                        yawAdjustment = -40  -- Forward and left
+                    elseif input.IsButtonDown(KEY_D) then
+                        yawAdjustment = 40  -- Forward and right
+                    end
+                elseif input.IsButtonDown(KEY_S) then
+                    yawAdjustment = 190  -- Backward
+                    if input.IsButtonDown(KEY_A) then
+                        yawAdjustment = -130  -- Backward and left
+                    elseif input.IsButtonDown(KEY_D) then
+                        yawAdjustment = 130 -- Backward and right
+                    end
+                elseif input.IsButtonDown(KEY_A) then
+                    yawAdjustment = -100  -- Left
+                elseif input.IsButtonDown(KEY_D) then
+                    yawAdjustment = 100  -- Right
+                end
 
-    cmd:SetButtons(cmd.buttons & (~IN_FORWARD))
-    cmd:SetButtons(cmd.buttons & (~IN_BACK))
-    cmd:SetButtons(cmd.buttons & (~IN_LEFT))
-    cmd:SetButtons(cmd.buttons & (~IN_RIGHT))
+            -- Calculate the base yaw angle based on the destination
+            local baseYaw = PositionAngles(plocalAbsOrigin, destination).yaw
 
-    cmd:SetForwardMove(result.x)
-    cmd:SetSideMove(result.y)
-    --userCmd:SetUpMove(result.z)
+            local adjustedYaw = NormalizeAngle(baseYaw + yawAdjustment)
+            local angle1 = EulerAngles(engine.GetViewAngles().pitch, adjustedYaw, 0)
 
+            engine.SetViewAngles(angle1)
+        end
+    
+
+    local currentVelocity = pLocal:EstimateAbsVelocity()  -- Get the current velocity
+
+    -- Invert the current velocity
+    local invertedVelocity = Vector3(-currentVelocity.x, -currentVelocity.y, -currentVelocity.z)
+
+    -- Compute the move to the destination
+    local moveToDestination = ComputeMove(cmd, Pos, destination)
+
+    local combinedMove = moveToDestination
+
+    if invertedVelocity:Length() >= 319 then
+        invertedVelocity = NormalizeVector(invertedVelocity)
+        -- Combine inverted velocity with moveToDestination
+        combinedMove = invertedVelocity + moveToDestination
+    end
+
+    combinedMove = NormalizeVector(combinedMove) * 320
+
+
+    -- Set forward and side move
+    cmd:SetForwardMove(combinedMove.x)
+    cmd:SetSideMove(combinedMove.y)
     -- Set the global move direction
-    movedir = Vector3(result.x, result.y, 0)
+    movedir = combinedMove
 end
+
+
+
 
 local function calculateRadiusOfSquare(sideLength)
     return math.sqrt(2 * (sideLength ^ 2))
@@ -667,7 +767,6 @@ end
 
 local allWarps = {}
 local endwarps = {}
-local TargetGlobalPlayer
 local global_CMD
 
 local function Assistance(cmd, target)
@@ -697,7 +796,7 @@ local function Assistance(cmd, target)
             if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
                 endwarps[angle] = {point[1], true}
 
-                if Menu.Main.AutoWalk and warp.CanWarp() then
+                if Menu.Main.AutoWalk then
                     WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
                 end
             end
@@ -726,17 +825,17 @@ local function AutoWarp(cmd, target)
             if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
                endwarps[angle] = {point[1], true}
 
-               if Menu.Main.AutoWalk and warp.CanWarp() then
-                   WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
-               end
-
-               if Menu.Advanced.AutoWarp and warp.CanWarp() then
-                   warp.TriggerWarp()
-               end
+                if Menu.Main.AutoWalk then
+                    WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+                    if warp.GetChargedTicks() > 23 then
+                        warp.TriggerWarp()
+                    end
+                end
             end
         end
 end
 
+local warpdelay = 0
 local function AutoWarp_AutoBlink(cmd, target)
     local RightOffst = calculateRightOffset(pLocal:GetAbsOrigin(), target:GetAbsOrigin(), { Vector3(-24, -24, 0), Vector3(24, 24, 82) }, 25)
     local LeftOffset = -RightOffst --calculateLeftOffset(pLocalPos, targetPos, vHitbox, Right)
@@ -752,26 +851,32 @@ local function AutoWarp_AutoBlink(cmd, target)
         end
     end
 
-
-            -- Main logic
+    -- Main logic
     local lastDistance
     for angle, point in pairs(endwarps) do
         local canBackstab = CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target)
-        local canWarp = warp.CanWarp()
-
-        if canBackstab then
+        if canBackstab and not canbackstabdirectly then
             endwarps[angle] = {point[1], true}
-
             if Menu.Main.AutoWalk then
+                -- Walk to the backstab position if AutoWalk is enabled
                 WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
-                if not canWarp and warp.GetChargedTicks() < 1 then
-                    gui.SetValue("fake lag", 1)
-                end
             end
 
-            if Menu.Advanced.AutoWarp and canTriggerWarp() then
+            if Menu.Advanced.AutoWarp and warp.GetChargedTicks() > 22 and warpdelay == 0 then
+                -- Trigger warp after changing direction 10 times
                 warp.TriggerWarp()
+            elseif warpdelay >= 5 then
+                warpdelay = 0
+            else
+                warpdelay = warpdelay + 1
+                gui.SetValue("fake lag", 1)
             end
+        --[[else
+            endwarps[angle] = {point[1], false}
+            if Menu.Main.AutoAlign then
+                WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), AutoAlign)
+            end
+            -- Optional: Logic for handling when you can't backstab from a position]]
         end
     end
 end
@@ -792,27 +897,43 @@ local function Debug(cmd, target)
      end
  
  
-         -- check if any of warp positions can stab anyone
-         local lastDistance
-         for angle, point in pairs(endwarps) do
-             if CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target) then
-                endwarps[angle] = {point[1], true}
+    -- Main logic
+    local lastDistance
+    for angle, point in pairs(endwarps) do
+        local canBackstab = CanBackstabFromPosition(cmd, point[1] + Vector3(0, 0, 75), false, target)
+        local canWarp = warp.CanWarp()
 
-                if Menu.Main.AutoWalk and warp.CanWarp() then
-                    WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
-                end
-
-                if Menu.Advanced.AutoWarp and warp.CanWarp() then
-                    warp.TriggerWarp()
-                end
-             end
-         end
+        if canBackstab then
+            endwarps[angle] = {point[1], true}
+            if Menu.Main.AutoWalk then
+                -- Walk to the backstab position if AutoWalk is enabled
+                WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), point[1])
+            end
+         
+            if not canWarp and warp.GetChargedTicks() < 1 then
+                gui.SetValue("fake lag", 1)
+            end
+         
+            if Menu.Advanced.AutoWarp and canWarp and warp.GetChargedTicks() > 23 then
+                -- Trigger warp after changing direction 10 times
+                warp.TriggerWarp()
+            end
+        else
+                endwarps[angle] = {point[1], false}
+            if Menu.Main.AutoAlign then
+                WalkTo(cmd, cachedLocalPlayer:GetAbsOrigin(), AutoAlign)
+            end
+            -- Optional: Logic for handling when you can't backstab from a position
+        end
+    end
 end
 
+local RechargeDelay = 0
 local function OnCreateMove(cmd)
     UpdateLocalPlayerCache()  -- Update local player data every tick
     UpdatePlayersCache()  -- Update player data every tick
     --UpdateBacktrackData() --update position and angle data for backtrack
+
     BestYawDifference = 0
     allWarps = {}
     endwarps = {}
@@ -820,6 +941,7 @@ local function OnCreateMove(cmd)
     --cmd:SetButtons(cmd.buttons & (~IN_JUMP))
 
     pLocal = entities.GetLocalPlayer()
+
     if not pLocal
     or pLocal:InCond(4) or pLocal:InCond(9)
     or pLocal:GetPropInt("m_bFeignDeathReady") == 1
@@ -829,10 +951,10 @@ local function OnCreateMove(cmd)
     local target = GetBestTarget(cachedLocalPlayer)
     if target == nil then
             gui.SetValue("fake lag", 0)
-
             if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 then -- if cannot dt/warp
                 warp.TriggerCharge()
             end
+            TargetGlobalPlayer = nil
         return
     end
     TargetGlobalPlayer = target
@@ -843,18 +965,20 @@ local function OnCreateMove(cmd)
 
     UpdateSimulationCache(pLocal)
 
-    if Menu.Main.AutoBackstab and CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
-        cmd:SetButtons(cmd.buttons | IN_ATTACK)   -- Perform backstab
+    if CanBackstabFromPosition(cmd, pLocalViewPos, true, target) then
         gui.SetValue("fake lag", 0)
-        if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 then -- if cannot dt/warp
+        RechargeDelay = RechargeDelay + 1
+        if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 and RechargeDelay > 5 then -- if cannot dt/warp
             warp.TriggerCharge()
+            RechargeDelay = 0
         end
+        return
     end
 
     if Menu.Main.TrickstabModeSelected == 1 then
-        AutoWarp(cmd, target)
-    elseif Menu.Main.TrickstabModeSelected == 2 then
         AutoWarp_AutoBlink(cmd, target)
+    elseif Menu.Main.TrickstabModeSelected == 2 then
+        AutoWarp(cmd, target)
     elseif Menu.Main.TrickstabModeSelected == 3 then
         
     elseif Menu.Main.TrickstabModeSelected == 4 then
@@ -988,7 +1112,7 @@ local function doDraw()
                     draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
                 end
             end
-        end        
+        end
     end
 
 
@@ -1036,7 +1160,10 @@ local function doDraw()
             ImMenu.EndFrame()
     
             ImMenu.BeginFrame(1)
-            Menu.Main.AutoBackstab = ImMenu.Checkbox("Auto Backstab", Menu.Main.AutoBackstab)
+            ImMenu.Text("Please Use Lbox Auto Bacsktab")
+            ImMenu.EndFrame()
+    
+            ImMenu.BeginFrame(1)
             Menu.Main.AutoWalk = ImMenu.Checkbox("Auto Walk", Menu.Main.AutoWalk)
             Menu.Main.AutoAlign = ImMenu.Checkbox("Auto Align", Menu.Main.AutoAlign)
             ImMenu.EndFrame()
