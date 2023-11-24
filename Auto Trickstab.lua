@@ -740,8 +740,8 @@ local function CalculateTrickstab()
         centralAngle = dy > 0 and 90 or (dy < 0 and -90 or 0)
     end
 
-    local rightOffset = math.min(calculateRightOffset(vHitbox, 25), 120)
-    local leftOffset = calculateLeftOffset(vHitbox, -25)
+    local rightOffset = math.min(calculateRightOffset(vHitbox, 25), 100)
+    local leftOffset = math.max(calculateLeftOffset(vHitbox, -25), -100)
 
     local Disguised = pLocal:InCond(TFCond_Disguised)
     MAX_SPEED = Disguised and pLocal:EstimateAbsVelocity():Length() or 320
