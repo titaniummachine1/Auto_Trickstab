@@ -1015,36 +1015,44 @@ local function doDraw()
             end
         end
 
-        -- Draw the circle with collision detection
         if Menu.Visuals.Attack_Circle and pLocal then
-            local segments = 32
-            local radius = 220
-            local center = pLocal:GetAbsOrigin()
+
+            local center = pLocal:GetAbsOrigin() -- Center of the circle at the player's feet
+            local viewPos = pLocalViewPos -- View position to shoot traces from
+            local radius = 220 -- Radius of the circle
+            local segments = 32 -- Number of segments to draw the circle
             local angleStep = (2 * math.pi) / segments
-
+        
+            -- Determine the color of the circle based on TargetPlayer
+            local circleColor = TargetPlayer and {0, 255, 0, 255} or {255, 255, 255, 255} -- Green if TargetPlayer exists, otherwise white
+        
+            -- Set the drawing color
+            draw.Color(table.unpack(circleColor))
+        
+            local vertices = {} -- Table to store adjusted vertices
+        
+            -- Calculate vertices and adjust based on trace results
             for i = 1, segments do
-                local startX = center.x + radius * math.cos(angleStep * (i - 1))
-                local startY = center.y + radius * math.sin(angleStep * (i - 1))
-                local endX = center.x + radius * math.cos(angleStep * i)
-                local endY = center.y + radius * math.sin(angleStep * i)
-
-                local startPoint = Vector3(startX, startY, center.z)
-                local endPoint = Vector3(endX, endY, center.z)
-
-                -- Check collision for both start and end points
-                startPoint = CheckCollisionAndAdjustPoint(center, startPoint, radius)
-                endPoint = CheckCollisionAndAdjustPoint(center, endPoint, radius)
-
-                -- Convert start and end points to screen space
-                local screenStart = client.WorldToScreen(startPoint)
-                local screenEnd = client.WorldToScreen(endPoint)
-
-                -- Draw each line segment
-                if screenStart and screenEnd then
-                    draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
+                local angle = angleStep * i
+                local circlePoint = center + Vector3(math.cos(angle), math.sin(angle), 0) * radius
+        
+                local trace = engine.TraceLine(viewPos, circlePoint, MASK_SHOT_HULL)
+                local endPoint = trace.fraction < 1.0 and trace.endpos or circlePoint
+        
+                vertices[i] = client.WorldToScreen(endPoint)
+            end
+        
+            -- Draw the circle using adjusted vertices
+            for i = 1, segments do
+                local j = (i % segments) + 1 -- Wrap around to the first vertex after the last one
+                if vertices[i] and vertices[j] then
+                    draw.Line(vertices[i][1], vertices[i][2], vertices[j][1], vertices[j][2])
                 end
             end
         end
+        
+
+
 
 
 
