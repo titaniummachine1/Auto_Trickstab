@@ -19,7 +19,7 @@ local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 2.2, -- dont touch this, this is just for managing the config version
+    Version = 2.3, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -38,7 +38,6 @@ local Menu = { -- this is the config that will be loaded every time u load the s
     Advanced = {
         ColisionCheck = true,
         AdvancedPred = true,
-        Simulations = 3,
         AutoWarp = true,
         AutoRecharge = true,
     },
@@ -239,7 +238,6 @@ local function UpdateLocalPlayerCache()
     --AlignPos = nil
     return pLocal
 end
-
 local function UpdateTarget()
     local allPlayers = entities.FindByClass("CTFPlayer")
     local bestTargetDetails = nil
@@ -256,13 +254,18 @@ local function UpdateTarget()
                 local hitboxidx = 4  -- Assuming hitboxID 4
                 local hitbox = player:GetHitboxes()[hitboxidx]
                 if hitbox then
+                    local hitboxCenter = (hitbox[1] + hitbox[2]) * 0.5
+                    local forwardVector = GetHitboxForwardDirection(player, 1)
+                    local backPoint = hitboxCenter - forwardVector * 30  -- 30 units behind the hitbox center
+
                     TargetPlayer = {
                         idx = player:GetIndex(),
                         entity = player,
                         Pos = playerAbsOrigin,
                         viewOffset = player:GetPropVector("localdata", "m_vecViewOffset[0]"),
-                        hitboxPos = (hitbox[1] + hitbox[2]) * 0.5,
-                        hitboxForward = GetHitboxForwardDirection(player, 1)
+                        hitboxPos = hitboxCenter,
+                        hitboxForward = forwardVector,
+                        backPoint = backPoint  -- Adding the backPoint parameter
                     }
 
                     if manhattanDistance < bestDistance then
@@ -280,6 +283,7 @@ local function UpdateTarget()
         return nil
     end
 end
+
 
 
 -- Initialize cache
@@ -647,31 +651,85 @@ local function calculateRightOffset(enemyAABB, initialOffset)
     return nil -- No unobstructed path found
 end
 
+
+-- Function to calculate the left offset with additional collision simulation
+local function calculateLeftOffset(enemyAABB, initialOffset)
+    local radius = 25  -- Assume this function correctly calculates the radius
+    local angleIncrement = 5
+    local maxIterations = 360 / angleIncrement
+    local initialDirection = NormalizeVector(TargetPlayer.Pos - pLocalPos)
+    local startAngle = initialOffset or 0
+    local stepSize = 5  -- Step size for incremental movement
+
+    for i = 0, maxIterations do
+        local currentAngle = (startAngle - i * angleIncrement + 360) % 360  -- Inverted angle for left side
+        local radianAngle = math.rad(currentAngle)
+        local rotatedDirection = Vector3(
+            initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
+            initialDirection.x * math.sin(radianAngle) + initialDirection.y * math.cos(radianAngle),
+            0
+        )
+
+        local offsetVector = rotatedDirection * radius * 2
+        local testPos = pLocalPos + offsetVector
+
+        -- Check for sphere collision
+        if not checkSphereCollision(testPos, radius, TargetPlayer.Pos, radius) then
+            local clearPathFound = false
+            for step = 0, radius, stepSize do
+                local incrementalPos = pLocalPos + rotatedDirection * (radius - step)
+                local incrementalAABBMin = incrementalPos - Vector3(radius, radius, radius)
+                local incrementalAABBMax = incrementalPos + Vector3(radius, radius, radius)
+
+                if not checkAABBAABBCollision(incrementalAABBMin, incrementalAABBMax, enemyAABB[1], enemyAABB[2]) then
+                    clearPathFound = true
+                    break
+                end
+            end
+
+            if clearPathFound then
+                return currentAngle
+            end
+        end
+    end
+
+    return nil -- No unobstructed path found
+end
 local cleartiemr = 50
+
 local function CalculateTrickstab()
     -- Ensure pLocal and TargetPlayer are valid and have position data
     if not pLocal or not pLocal:GetAbsOrigin() then
         print("Local player position is undefined")
-        return
+        return nil
     end
 
     if not TargetPlayer or not TargetPlayer.Pos then
         print("Target player or target player position is undefined")
-        return
+        return nil
     end
 
-    local playerPos = pLocal:GetAbsOrigin()  -- Get local player position
+    local playerPos = pLocal:GetAbsOrigin()
     local targetPos = TargetPlayer.Pos
-    local rightOffset = calculateRightOffset(vHitbox, 25)  -- Calculate right offset
-    local leftOffset = -rightOffset
-    local centralAngle = math.deg(math.atan(targetPos.y - playerPos.y, targetPos.x - playerPos.x))
-    local backstabPosition = nil
+    local dx = targetPos.x - playerPos.x
+    local dy = targetPos.y - playerPos.y
+
+    -- Calculate central angle using math.atan
+    local centralAngle
+    if dx ~= 0 then
+        centralAngle = math.deg(math.atan(dy / dx))
+        if dx < 0 then
+            centralAngle = centralAngle + 180
+        end
+    else
+        centralAngle = dy > 0 and 90 or (dy < 0 and -90 or 0)
+    end
+
+    local rightOffset = math.min(calculateRightOffset(vHitbox, 25), 120)
+    local leftOffset = math.max(calculateLeftOffset(vHitbox, 25), -120)
 
     local Disguised = pLocal:InCond(TFCond_Disguised)
     MAX_SPEED = Disguised and pLocal:EstimateAbsVelocity():Length() or 320
-
-    local totalSimulations = math.max(3, math.min(Menu.Advanced.Simulations or 24, 20))
-    local angleIncrement = (rightOffset - leftOffset) / (totalSimulations - 1)
 
     -- Function to validate a test point
     local function isValidTestPoint(point)
@@ -691,42 +749,34 @@ local function CalculateTrickstab()
         return isValidTestPoint(testPoint) and CheckBackstab(testPoint)
     end
 
-    -- Start with forward vector simulation
-    if simulateAndCheckBackstab(centralAngle) then
-        return SimulateDash(createDirectionVector(centralAngle), SIMULATION_TICKS)
-    end
-
     -- Determine initial yaw difference for further simulations
     local enemyYaw = CalculateYawAngle(TargetPlayer.hitboxPos, TargetPlayer.hitboxForward)
     local spyYaw = PositionYaw(playerPos, targetPos)
     local initialYawDiff = NormalizeYaw(spyYaw - enemyYaw)
     local prioritizeRight = initialYawDiff <= 0
 
-    -- Check the most likely direction first
+    -- Check the most likely side direction first
     local likelyAngleOffset = prioritizeRight and rightOffset or leftOffset
     if simulateAndCheckBackstab(centralAngle + likelyAngleOffset) then
         return SimulateDash(createDirectionVector(centralAngle + likelyAngleOffset), SIMULATION_TICKS)
     end
 
-    -- Loop through remaining simulations only if necessary
-    for i = 1, totalSimulations - 2 do
-        local currentAngle = centralAngle + leftOffset + angleIncrement * i
-        if simulateAndCheckBackstab(currentAngle) then
-            backstabPosition = SimulateDash(createDirectionVector(currentAngle), SIMULATION_TICKS)
-            endwarps[i] = {backstabPosition, true}
-            break
-        end
+    -- Check the back angle next
+    local backAngle = PositionYaw(playerPos, TargetPlayer.backPoint)
+    if simulateAndCheckBackstab(backAngle) then
+        return SimulateDash(createDirectionVector(backAngle), SIMULATION_TICKS)
     end
 
-    cleartiemr = cleartiemr - 1
-    if cleartiemr < 1 then
-        collectgarbage()
-        cleartiemr = 50
+    -- Try the forward angle if both side and back angles fail
+    if simulateAndCheckBackstab(centralAngle) then
+        return SimulateDash(createDirectionVector(centralAngle), SIMULATION_TICKS)
     end
 
-
-    return backstabPosition
+    -- Fail the function if all checks don't work
+    return nil
 end
+
+
 
 -- Computes the move vector between two points
 ---@param userCmd UserCmd
@@ -1089,9 +1139,6 @@ local function doDraw()
         end
 
         if Menu.tabs.Advanced then
-            ImMenu.BeginFrame(1)
-            Menu.Advanced.Simulations = ImMenu.Slider("Simulations", Menu.Advanced.Simulations, 3, 20)
-            ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
             Menu.Advanced.AutoWarp = ImMenu.Checkbox("Auto Warp", Menu.Advanced.AutoWarp)
