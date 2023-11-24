@@ -17,9 +17,10 @@ local Helpers = lnxLib.TF2.Helpers
 local Prediction = lnxLib.TF2.Prediction
 local Fonts = lnxLib.UI.FontslnxLib
 
+
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 2.5, -- dont touch this, this is just for managing the config version
+    Version = 2.6, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -38,7 +39,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
     Advanced = {
         ColisionCheck = true,
         AdvancedPred = true,
-        Accuracy = 24,
+        Accuracy = 25,
         AutoWarp = true,
         AutoRecharge = true,
     },
@@ -257,7 +258,7 @@ local function UpdateTarget()
                 if hitbox then
                     local hitboxCenter = (hitbox[1] + hitbox[2]) * 0.5
                     local forwardVector = GetHitboxForwardDirection(player, 1)
-                    local backPoint = hitboxCenter - forwardVector * 30  -- 30 units behind the hitbox center
+                    local backPoint = hitboxCenter + forwardVector * 30  -- 30 units behind the hitbox center
 
                     TargetPlayer = {
                         idx = player:GetIndex(),
@@ -618,7 +619,7 @@ end
 
 -- Function to calculate the right offset with additional collision simulation
 local function calculateRightOffset(enemyAABB, initialOffset)
-    local radius = 25  -- Assume this function correctly calculates the radius
+    local radius = 25.5  -- Assume this function correctly calculates the radius
     local angleIncrement = 5
     local maxIterations = 360 / angleIncrement
     local initialDirection = NormalizeVector(TargetPlayer.Pos - pLocalPos) -- Corrected variable name
@@ -664,15 +665,14 @@ end
 
 -- Function to calculate the left offset with additional collision simulation
 local function calculateLeftOffset(enemyAABB, initialOffset)
-    local radius = 25  -- Assume this function correctly calculates the radius
-    local angleIncrement = 5
-    local maxIterations = 360 / angleIncrement
-    local initialDirection = NormalizeVector(TargetPlayer.Pos - pLocalPos)
-    local startAngle = initialOffset or 0
-    local stepSize = 5  -- Step size for incremental movement
+    local radius = 25.5 -- Radius for simulation
+    local angleIncrement = 5 -- Degrees to increment each simulation step
+    local maxIterations = 360 / angleIncrement -- Total number of iterations to cover 360 degrees
+    local initialDirection = NormalizeVector(TargetPlayer.Pos - pLocal:GetAbsOrigin())
+    local startAngle = initialOffset or 0 -- Starting angle for the simulation
 
     for i = 0, maxIterations do
-        local currentAngle = (startAngle - i * angleIncrement + 360) % 360  -- Inverted angle for left side
+        local currentAngle = (startAngle + i * angleIncrement) % 360 -- Increment angle to the right
         local radianAngle = math.rad(currentAngle)
         local rotatedDirection = Vector3(
             initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
@@ -681,13 +681,13 @@ local function calculateLeftOffset(enemyAABB, initialOffset)
         )
 
         local offsetVector = rotatedDirection * radius * 2
-        local testPos = pLocalPos + offsetVector
+        local testPos = pLocal:GetAbsOrigin() + offsetVector
 
         -- Check for sphere collision
         if not checkSphereCollision(testPos, radius, TargetPlayer.Pos, radius) then
             local clearPathFound = false
-            for step = 0, radius, stepSize do
-                local incrementalPos = pLocalPos + rotatedDirection * (radius - step)
+            for step = 0, radius, 5 do -- Step size for incremental movement
+                local incrementalPos = pLocal:GetAbsOrigin() + rotatedDirection * (radius - step)
                 local incrementalAABBMin = incrementalPos - Vector3(radius, radius, radius)
                 local incrementalAABBMax = incrementalPos + Vector3(radius, radius, radius)
 
@@ -705,6 +705,11 @@ local function calculateLeftOffset(enemyAABB, initialOffset)
 
     return nil -- No unobstructed path found
 end
+
+
+
+
+
 local cleartiemr = 50
 
 local function CalculateTrickstab()
@@ -736,7 +741,7 @@ local function CalculateTrickstab()
     end
 
     local rightOffset = math.min(calculateRightOffset(vHitbox, 25), 120)
-    local leftOffset = math.max(calculateLeftOffset(vHitbox, 25), -120)
+    local leftOffset = calculateLeftOffset(vHitbox, -25)
 
     local Disguised = pLocal:InCond(TFCond_Disguised)
     MAX_SPEED = Disguised and pLocal:EstimateAbsVelocity():Length() or 320
@@ -763,18 +768,20 @@ local function CalculateTrickstab()
     local enemyYaw = CalculateYawAngle(TargetPlayer.hitboxPos, TargetPlayer.hitboxForward)
     local spyYaw = PositionYaw(playerPos, targetPos)
     local initialYawDiff = NormalizeYaw(spyYaw - enemyYaw)
-    local prioritizeRight = initialYawDiff <= 0
 
-    -- Check the most likely side direction first
-    local likelyAngleOffset = prioritizeRight and rightOffset or leftOffset
-    if simulateAndCheckBackstab(centralAngle + likelyAngleOffset) then
-        return SimulateDash(createDirectionVector(centralAngle + likelyAngleOffset), SIMULATION_TICKS)
-    end
+    local prioritizeRight = initialYawDiff < 0
 
     -- Check the back angle next
     local backAngle = PositionYaw(playerPos, TargetPlayer.backPoint)
     if simulateAndCheckBackstab(backAngle) then
         return SimulateDash(createDirectionVector(backAngle), SIMULATION_TICKS)
+    end
+
+    -- Check the most likely side direction first
+    local likelyAngleOffset = prioritizeRight and rightOffset or leftOffset
+  
+    if simulateAndCheckBackstab(centralAngle + likelyAngleOffset) then
+        return SimulateDash(createDirectionVector(centralAngle + likelyAngleOffset), SIMULATION_TICKS)
     end
 
     -- Try the forward angle if both side and back angles fail
