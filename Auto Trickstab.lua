@@ -19,7 +19,7 @@ local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 2.3, -- dont touch this, this is just for managing the config version
+    Version = 2.5, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -38,6 +38,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
     Advanced = {
         ColisionCheck = true,
         AdvancedPred = true,
+        Accuracy = 24,
         AutoWarp = true,
         AutoRecharge = true,
     },
@@ -284,50 +285,8 @@ local function UpdateTarget()
     end
 end
 
-
-
 -- Initialize cache
 UpdateLocalPlayerCache()
-
--- Constants
-local MAX_SPEED = 320  -- Maximum speed
-local SIMULATION_TICKS = 25  -- Number of ticks for simulation
-local positions = {}
-
-local FORWARD_COLLISION_ANGLE = 55
-local GROUND_COLLISION_ANGLE_LOW = 45
-local GROUND_COLLISION_ANGLE_HIGH = 55
-
-local function BasicTraceHull(startPoint, endPoint, hitbox, traceMask)
-    local direction = (endPoint - startPoint):Normalize()
-    
-    -- Determine hitbox size and calculate offset
-    local hitboxSize = hitbox.max - hitbox.min
-    local hitboxOffset = hitboxSize * 0.5 * direction
-
-    -- Adjust the start position based on hitbox size
-    local adjustedStart = startPoint + hitboxOffset
-
-    -- Determine the closest hitbox corner in the direction
-    local closestHitboxCorner = Vector3(
-        direction.x > 0 and hitbox.max.x or hitbox.min.x,
-        direction.y > 0 and hitbox.max.y or hitbox.min.y,
-        hitbox.min.z -- Bottom corner
-    )
-
-    local closestCornerPoint = startPoint + closestHitboxCorner
-    local sidewaysTrace = engine.TraceLine(adjustedStart, closestCornerPoint, traceMask)
-
-    if sidewaysTrace.Hit then
-        -- If there's a collision, do a trace from start to collision point
-        local collisionTrace = engine.TraceLine(startPoint, sidewaysTrace.HitPos, traceMask)
-        return collisionTrace
-    else
-        -- If no collision, return the original sideways trace result
-        return sidewaysTrace
-    end
-end
-
 
 -- Normalize a yaw angle to the range [-180, 180]
 local function NormalizeYaw(yaw)
@@ -475,6 +434,47 @@ local function CheckBackstab(testPoint)
     return false, nil
 end
 
+
+-- Constants
+local MAX_SPEED = 320  -- Maximum speed
+local SIMULATION_TICKS = 25  -- Number of ticks for simulation
+local positions = {}
+
+local FORWARD_COLLISION_ANGLE = 55
+local GROUND_COLLISION_ANGLE_LOW = 45
+local GROUND_COLLISION_ANGLE_HIGH = 55
+
+local function BasicTraceHull(startPoint, endPoint, hitbox, traceMask)
+    local direction = (endPoint - startPoint):Normalize()
+    
+    -- Determine hitbox size and calculate offset
+    local hitboxSize = hitbox.max - hitbox.min
+    local hitboxOffset = hitboxSize * 0.5 * direction
+
+    -- Adjust the start position based on hitbox size
+    local adjustedStart = startPoint + hitboxOffset
+
+    -- Determine the closest hitbox corner in the direction
+    local closestHitboxCorner = Vector3(
+        direction.x > 0 and hitbox.max.x or hitbox.min.x,
+        direction.y > 0 and hitbox.max.y or hitbox.min.y,
+        hitbox.min.z -- Bottom corner
+    )
+
+    local closestCornerPoint = startPoint + closestHitboxCorner
+    local sidewaysTrace = engine.TraceLine(adjustedStart, closestCornerPoint, traceMask)
+
+    if sidewaysTrace.Hit then
+        -- If there's a collision, do a trace from start to collision point
+        local collisionTrace = engine.TraceLine(startPoint, sidewaysTrace.HitPos, traceMask)
+        return collisionTrace
+    else
+        -- If no collision, return the original sideways trace result
+        return sidewaysTrace
+    end
+end
+
+
 -- Helper function for forward collision
 local function handleForwardCollision(vel, wallTrace, vUp)
     local normal = wallTrace.plane
@@ -520,22 +520,32 @@ local function UpdateSimulationCache()
     simulationCache.flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
 end
 
+
+
 -- Simulates movement in a specified direction vector for a player over a given number of ticks
-local function SimulateDash(simulatedVelocity, ticks)
-    local tick_interval = simulationCache.tickInterval
-    local gravity = simulationCache.gravity
+local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
+    local BACKTRACK_ACCURACY = 1
+    local accuracy = Menu.Advanced.Accuracy
+    if isBacktrack == true then
+        accuracy = math.max(1, math.min(BACKTRACK_ACCURACY, SIMULATION_TICKS))
+    else
+        accuracy = math.max(1, math.min(Menu.Advanced.Accuracy or SIMULATION_TICKS, SIMULATION_TICKS))
+    end
+    local tick_interval = simulationCache.tickInterval * (SIMULATION_TICKS / accuracy)
+    local gravity = simulationCache.gravity * (SIMULATION_TICKS / accuracy)
     local stepSize = simulationCache.stepSize
     local vUp = Vector3(0, 0, 1)
     local vStep = Vector3(0, 0, stepSize / 2)
 
-    local localPositions = {}  -- Use a local variable to store positions for this simulation
+    local localPositions = {}
     local lastP = pLocalPos
     local lastV = simulatedVelocity
     local flags = simulationCache.flags
     local lastG = (flags & 1 == 1)
     local Endpos = Vector3(0, 0, 0)
 
-    for i = 1, ticks do
+
+    for i = 1, accuracy do -- Loop runs for the number of ticks determined by accuracy
         
         local pos = lastP + lastV * tick_interval
         local vel = lastV
@@ -1139,6 +1149,10 @@ local function doDraw()
         end
 
         if Menu.tabs.Advanced then
+
+            ImMenu.BeginFrame(1)
+            Menu.Advanced.Accuracy = ImMenu.Slider("Accuracy", Menu.Advanced.Accuracy, 1, SIMULATION_TICKS)
+            ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
             Menu.Advanced.AutoWarp = ImMenu.Checkbox("Auto Warp", Menu.Advanced.AutoWarp)
