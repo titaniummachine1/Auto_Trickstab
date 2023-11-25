@@ -6,8 +6,7 @@
 # Auto_Trickstab
 ![image](https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/fd30e64e-5aef-47ef-a1fa-7ab2de0dace5)
 
-
-
+https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/bf32fbb5-cb37-4c75-9c89-90be1c46bb68
 
 # featheres
 auto config system(loads and saves config automaticaly)
