@@ -851,7 +851,7 @@ end
 ---@param destination Vector3
 local function WalkTo(cmd, Pos, destination)
     -- Check if Warp is possible and player's velocity is high enough
-    if pLocal and warp.CanWarp() and warp.GetChargedTicks() < 22 and pLocal:EstimateAbsVelocity():Length() > 319 then
+    if pLocal and warp.CanWarp() and pLocal:EstimateAbsVelocity():Length() > 319 then
         local forwardMove = cmd:GetForwardMove()
         local sideMove = cmd:GetSideMove()
         
