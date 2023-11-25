@@ -163,15 +163,11 @@ local function isNaN(x) return x ~= x end
 local function PositionAngles(source, dest)
     local delta = source - dest
 
-    local pitch = math.atan(delta.z / math.sqrt(delta.x * delta.x + delta.y * delta.y)) * M_RADPI
-    local yaw = 0
+    local pitch = math.atan(delta.z / delta:Length2D()) * M_RADPI
+    local yaw = math.atan(delta.y / delta.x) * M_RADPI
 
-    if delta.x == 0 and delta.y == 0 then
-        yaw = 0
-    elseif delta.x >= 0 then
-        yaw = math.atan(delta.y / delta.x) * M_RADPI + 180
-    else
-        yaw = math.atan(delta.y / delta.x) * M_RADPI
+    if delta.x >= 0 then
+        yaw = yaw + 180
     end
 
     if isNaN(pitch) then pitch = 0 end
@@ -789,7 +785,7 @@ local function CalculateTrickstab()
 
     local prioritizeRight = initialYawDiff < 0
 
-    if initialYawDiff > 90 then
+    if initialYawDiff > 80 then
         -- Check the back angle next
         local backAngle = PositionYaw(playerPos, TargetPlayer.backPoint)
         if simulateAndCheckBackstab(backAngle) then
@@ -818,7 +814,7 @@ end
 
 
 -- Computes the move vector between two points
----@param userCmd UserCmd
+---@param cmd UserCmd
 ---@param a Vector3
 ---@param b Vector3
 ---@return Vector3
@@ -852,7 +848,7 @@ end
 ---@param destination Vector3
 local function WalkTo(cmd, Pos, destination)
     -- Check if Warp is possible and player's velocity is high enough
-    if warp.CanWarp() and pLocal:EstimateAbsVelocity():Length() > 319 then
+    if pLocal and pLocal:EstimateAbsVelocity():Length() > 319 then
         local forwardMove = cmd:GetForwardMove()
         local sideMove = cmd:GetSideMove()
         
@@ -937,7 +933,7 @@ end
 
 local RechargeDelay = 0
 local function OnCreateMove(cmd)
-    if UpdateLocalPlayerCache() == false then return end  -- Update local player data every tick
+    if UpdateLocalPlayerCache() == false or not pLocal then return end  -- Update local player data every tick
     endwarps = {}
     positions = {}
 
