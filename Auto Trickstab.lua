@@ -257,16 +257,29 @@ local function UpdateTarget()
                 local hitbox = player:GetHitboxes()[hitboxidx]
                 if hitbox then
                     local hitboxCenter = (hitbox[1] + hitbox[2]) * 0.5
-                    local forwardVector = GetHitboxForwardDirection(player, 1)
+                    --local forwardVector = GetHitboxForwardDirection(player, 1)
+                    
+                    local forwardAngle = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]")
+                    -- Assuming forwardAngle is a Vector3 where:
+                    -- forwardAngle.x = Pitch, forwardAngle.y = Yaw, forwardAngle.z = Roll
+                    -- Convert degrees to radians for trigonometric functions
+                    local pitch = math.rad(forwardAngle.x)
+                    local yaw = math.rad(forwardAngle.y) + math.pi
+                    local forwardVector = Vector3(
+                        math.cos(pitch) * math.cos(yaw),  -- X component
+                        math.cos(pitch) * math.sin(yaw),  -- Y component
+                        0                  -- Z component
+                    )
                     local backPoint = hitboxCenter + forwardVector * 30  -- 30 units behind the hitbox center
 
                     TargetPlayer = {
                         idx = player:GetIndex(),
                         entity = player,
                         Pos = playerAbsOrigin,
+                        FPos = playerAbsOrigin + player:EstimateAbsVelocity(),
                         viewOffset = player:GetPropVector("localdata", "m_vecViewOffset[0]"),
                         hitboxPos = hitboxCenter,
-                        hitboxForward = forwardVector,
+                        hitboxForward = forwardVector,-- forwardVector,
                         backPoint = backPoint  -- Adding the backPoint parameter
                     }
 
@@ -771,10 +784,12 @@ local function CalculateTrickstab()
 
     local prioritizeRight = initialYawDiff < 0
 
-    -- Check the back angle next
-    local backAngle = PositionYaw(playerPos, TargetPlayer.backPoint)
-    if simulateAndCheckBackstab(backAngle) then
-        return SimulateDash(createDirectionVector(backAngle), SIMULATION_TICKS)
+    if initialYawDiff > 90 then
+        -- Check the back angle next
+        local backAngle = PositionYaw(playerPos, TargetPlayer.backPoint)
+        if simulateAndCheckBackstab(backAngle) then
+            return SimulateDash(createDirectionVector(backAngle), SIMULATION_TICKS)
+        end
     end
 
     -- Check the most likely side direction first
@@ -826,67 +841,64 @@ local function NormalizeAngle(angle)
 end
 
 -- Walks to the destination and sets the global move direction
----@param userCmd UserCmd
----@param localPlayer Entity
+---@param cmd UserCmd
 ---@param destination Vector3
 local function WalkTo(cmd, Pos, destination)
-        if warp.CanWarp() and pLocal:EstimateAbsVelocity():Length() > 319 then
-                -- Adjust yaw angle based on movement keys
-                local yawAdjustment = 0
-                if input.IsButtonDown(KEY_W) then
-                    yawAdjustment = 0  -- Forward
-                    if input.IsButtonDown(KEY_A) then
-                        yawAdjustment = -40  -- Forward and left
-                    elseif input.IsButtonDown(KEY_D) then
-                        yawAdjustment = 40  -- Forward and right
-                    end
-                elseif input.IsButtonDown(KEY_S) then
-                    yawAdjustment = 190  -- Backward
-                    if input.IsButtonDown(KEY_A) then
-                        yawAdjustment = -130  -- Backward and left
-                    elseif input.IsButtonDown(KEY_D) then
-                        yawAdjustment = 130 -- Backward and right
-                    end
-                elseif input.IsButtonDown(KEY_A) then
-                    yawAdjustment = -100  -- Left
-                elseif input.IsButtonDown(KEY_D) then
-                    yawAdjustment = 100  -- Right
-                end
-
-            -- Calculate the base yaw angle based on the destination
-            local baseYaw = PositionAngles(pLocalPos, destination).yaw
-
-            local adjustedYaw = NormalizeAngle(baseYaw + yawAdjustment)
-            local angle1 = EulerAngles(engine.GetViewAngles().pitch, adjustedYaw, 0)
-
-            engine.SetViewAngles(angle1)
+    -- Check if Warp is possible and player's velocity is high enough
+    if warp.CanWarp() and pLocal:EstimateAbsVelocity():Length() > 319 then
+        local forwardMove = cmd:GetForwardMove()
+        local sideMove = cmd:GetSideMove()
+        
+        -- Normalize move values for diagonal movement
+        if forwardMove ~= 0 and sideMove ~= 0 then
+            forwardMove = forwardMove / math.sqrt(2)  -- Normalize for diagonal
+            sideMove = sideMove / math.sqrt(2)        -- Normalize for diagonal
         end
-
-    local currentVelocity = pLocal:EstimateAbsVelocity()  -- Get the current velocity
-
-    -- Invert the current velocity
-    local invertedVelocity = Vector3(-currentVelocity.x, -currentVelocity.y, -currentVelocity.z)
-
-    -- Compute the move to the destination
-    local moveToDestination = ComputeMove(cmd, Pos, destination)
-
-    local combinedMove = moveToDestination
-
-    if invertedVelocity and invertedVelocity:Length() >= 319 then
-        invertedVelocity = NormalizeVector(invertedVelocity)
-        -- Combine inverted velocity with moveToDestination
-        combinedMove = invertedVelocity + moveToDestination
+        
+        -- Determine the movement direction
+        local moveDirectionAngle = 0
+        if forwardMove > 0 then
+            if sideMove > 0 then
+                moveDirectionAngle = 45  -- Moving forward-right
+            elseif sideMove < 0 then
+                moveDirectionAngle = -45 -- Moving forward-left
+            else
+                moveDirectionAngle = 0   -- Moving forward
+            end
+        elseif forwardMove < 0 then
+            if sideMove > 0 then
+                moveDirectionAngle = 135  -- Moving backward-right
+            elseif sideMove < 0 then
+                moveDirectionAngle = -135 -- Moving backward-left
+            else
+                moveDirectionAngle = 180  -- Moving backward
+            end
+        else
+            if sideMove > 0 then
+                moveDirectionAngle = 90  -- Moving right
+            elseif sideMove < 0 then
+                moveDirectionAngle = -90 -- Moving left
+            end
+        end
+        
+        -- Calculate the base yaw angle towards the destination and adjust by movement direction
+        local baseYaw = PositionAngles(Pos, destination).yaw
+        local adjustedYaw = NormalizeAngle(baseYaw + moveDirectionAngle)
+        
+        -- Set view angles
+        local newViewAngles = EulerAngles(engine.GetViewAngles().pitch, adjustedYaw, 0)
+        engine.SetViewAngles(newViewAngles)
     end
 
-    combinedMove = NormalizeVector(combinedMove) * 320
+    -- Compute the move towards the destination
+    local moveToDestination = ComputeMove(cmd, Pos, destination)
 
-
-    -- Set forward and side move
-    cmd:SetForwardMove(combinedMove.x)
-    cmd:SetSideMove(combinedMove.y)
-    -- Set the global move direction
-    movedir = combinedMove
+    -- Normalize and apply the move command
+    moveToDestination = NormalizeVector(moveToDestination) * 450
+    cmd:SetForwardMove(moveToDestination.x)
+    cmd:SetSideMove(moveToDestination.y)
 end
+
 
 local warpdelay = 0
 local function AutoWarp_AutoBlink(cmd)
@@ -901,23 +913,21 @@ local function AutoWarp_AutoBlink(cmd)
             end
 
             if Menu.Advanced.AutoWarp and warp.CanWarp() then
-                -- Trigger warp after changing direction 10 times
+                -- Trigger warp after changing direction and disable fakelag so warp works right
                 gui.SetValue("fake lag", 0)
                 warp.TriggerWarp()
-            elseif not warp.CanWarp() then
+            elseif Menu.Advanced.AutoWarp and not warp.CanWarp() then
                 gui.SetValue("fake lag", 1)
             else
                 gui.SetValue("fake lag", 0)
             end
+        end
         --[[else
             endwarps[angle] = {point[1], false}
             if Menu.Main.AutoAlign then
                 WalkTo(cmd, pLocal:GetAbsOrigin(), AutoAlign)
             end
             -- Optional: Logic for handling when you can't backstab from a position]]
-        elseif warp.GetChargedTicks() > 22 then
-            gui.SetValue("fake lag", 1)
-        end
 end
 
 local RechargeDelay = 0
@@ -937,7 +947,7 @@ local function OnCreateMove(cmd)
 
     if not TargetPlayer then
         gui.SetValue("fake lag", 0)
-        if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 23 then
+        if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 23 and not warp.CanWarp()then
             warp.TriggerCharge()
         end
         --TargetPlayer = {}
@@ -958,21 +968,6 @@ local function OnCreateMove(cmd)
         end
     end
 end
-
-    -- Function to check for wall collision and adjust circle points
-    local function CheckCollisionAndAdjustPoint(center, point, radius)
-        -- Perform a trace line from the center to the point
-        local traceResult = engine.TraceLine(center, point, MASK_SOLID)
-
-        -- If the trace hits something before reaching the full radius, adjust the point
-        if traceResult.fraction < 1 then
-            local distanceToWall = radius * traceResult.fraction
-            local direction = NormalizeVector(point - center)
-            return center + direction * distanceToWall
-        end
-
-        return point
-    end
 
 local consolas = draw.CreateFont("Consolas", 17, 500)
 local current_fps = 0
