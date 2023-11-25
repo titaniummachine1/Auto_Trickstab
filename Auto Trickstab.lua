@@ -275,7 +275,7 @@ local function UpdateTarget()
                         idx = player:GetIndex(),
                         entity = player,
                         Pos = playerAbsOrigin,
-                        FPos = playerAbsOrigin + player:EstimateAbsVelocity(),
+                        FPos = playerAbsOrigin + player:EstimateAbsVelocity() * 0.015,
                         viewOffset = player:GetPropVector("localdata", "m_vecViewOffset[0]"),
                         hitboxPos = hitboxCenter,
                         hitboxForward = forwardVector,-- forwardVector,
@@ -389,7 +389,7 @@ local function checkInRange(spherePos, sphereRadius)
     end
 
     -- Retrieve target player's position and hitbox
-    local targetPos = TargetPlayer.Pos
+    local targetPos = TargetPlayer.FPos
     local hitbox_min = (targetPos + vHitbox[1]) -- Replace with actual way to get 
     local hitbox_max = (targetPos + vHitbox[2]) -- Replace with actual way to get hitbox max
 
@@ -428,13 +428,13 @@ local function CheckBackstab(testPoint)
 
     local viewPos = testPoint + Vector3(0, 0, 75) -- Adjust for viewpoint
 
-    if TargetPlayer and TargetPlayer.Pos and TargetPlayer.hitboxForward then
+    if TargetPlayer and TargetPlayer.FPos and TargetPlayer.hitboxForward then
         local InRange, closestPoint = checkInRange(viewPos, 66) -- Assuming checkInRange is defined correctly
         if InRange and TargetPlayer.hitboxForward then
             local enemyYaw = CalculateYawAngle(TargetPlayer.hitboxPos, TargetPlayer.hitboxForward)
             enemyYaw = NormalizeYaw(enemyYaw) -- Normalize
 
-            local spyYaw = PositionYaw(TargetPlayer.Pos, viewPos)
+            local spyYaw = PositionYaw(TargetPlayer.FPos, viewPos)
             local Delta = math.abs(NormalizeYaw(spyYaw - enemyYaw))
 
             local canBackstab = CheckYawDelta(spyYaw, enemyYaw) -- Assuming CheckYawDelta is defined correctly
@@ -639,7 +639,7 @@ local function calculateRightOffset(enemyAABB, initialOffset)
     local radius = 25.5  -- Assume this function correctly calculates the radius
     local angleIncrement = 5
     local maxIterations = 360 / angleIncrement
-    local initialDirection = NormalizeVector(TargetPlayer.Pos - pLocalPos) -- Corrected variable name
+    local initialDirection = NormalizeVector(TargetPlayer.FPos - pLocalPos) -- Corrected variable name
     local startAngle = initialOffset or 0
     local stepSize = 5  -- Step size for incremental movement
 
@@ -656,7 +656,7 @@ local function calculateRightOffset(enemyAABB, initialOffset)
         local testPos = pLocalPos + offsetVector
 
         -- Check for sphere collision
-        if not checkSphereCollision(testPos, radius, TargetPlayer.Pos, radius) then
+        if not checkSphereCollision(testPos, radius, TargetPlayer.FPos, radius) then
             local clearPathFound = false
             for step = 0, radius, stepSize do
                 local incrementalPos = pLocalPos + rotatedDirection * (radius - step)
@@ -685,7 +685,7 @@ local function calculateLeftOffset(enemyAABB, initialOffset)
     local radius = 25.5 -- Radius for simulation
     local angleIncrement = 5 -- Degrees to increment each simulation step
     local maxIterations = 360 / angleIncrement -- Total number of iterations to cover 360 degrees
-    local initialDirection = NormalizeVector(TargetPlayer.Pos - pLocal:GetAbsOrigin())
+    local initialDirection = NormalizeVector(TargetPlayer.FPos - pLocal:GetAbsOrigin())
     local startAngle = initialOffset or 0 -- Starting angle for the simulation
 
     for i = 0, maxIterations do
@@ -701,7 +701,7 @@ local function calculateLeftOffset(enemyAABB, initialOffset)
         local testPos = pLocal:GetAbsOrigin() + offsetVector
 
         -- Check for sphere collision
-        if not checkSphereCollision(testPos, radius, TargetPlayer.Pos, radius) then
+        if not checkSphereCollision(testPos, radius, TargetPlayer.FPos, radius) then
             local clearPathFound = false
             for step = 0, radius, 5 do -- Step size for incremental movement
                 local incrementalPos = pLocal:GetAbsOrigin() + rotatedDirection * (radius - step)
@@ -736,13 +736,13 @@ local function CalculateTrickstab()
         return nil
     end
 
-    if not TargetPlayer or not TargetPlayer.Pos then
+    if not TargetPlayer or not TargetPlayer.FPos then
         print("Target player or target player position is undefined")
         return nil
     end
 
     local playerPos = pLocal:GetAbsOrigin()
-    local targetPos = TargetPlayer.Pos
+    local targetPos = TargetPlayer.FPos
     local dx = targetPos.x - playerPos.x
     local dy = targetPos.y - playerPos.y
 
@@ -916,7 +916,7 @@ local function AutoWarp_AutoBlink(cmd)
                 WalkTo(cmd, pLocalPos, BackstabPos)
             end
 
-            if Menu.Advanced.AutoWarp and warp.CanWarp() and warp.GetChargedTicks > 22 then
+            if Menu.Advanced.AutoWarp and warp.CanWarp() and warp.GetChargedTicks() > 23 then
                 -- Trigger warp after changing direction and disable fakelag so warp works right
                 gui.SetValue("fake lag", 0)
                 warp.TriggerWarp()
@@ -1083,7 +1083,7 @@ local function doDraw()
         end
 
         if Menu.Visuals.ForwardLine then
-            if TargetPlayer and TargetPlayer.Pos then
+            if TargetPlayer and TargetPlayer.FPos then
                 local forward = TargetPlayer.hitboxForward
                 local hitboxPos = TargetPlayer.hitboxPos
 
