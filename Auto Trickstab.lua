@@ -275,7 +275,7 @@ local function UpdateTarget()
                         idx = player:GetIndex(),
                         entity = player,
                         Pos = playerAbsOrigin,
-                        FPos = playerAbsOrigin + player:EstimateAbsVelocity() * 0.015,
+                        FPos = playerAbsOrigin + player:EstimateAbsVelocity() * 0.030,
                         viewOffset = player:GetPropVector("localdata", "m_vecViewOffset[0]"),
                         hitboxPos = hitboxCenter,
                         hitboxForward = forwardVector,-- forwardVector,
