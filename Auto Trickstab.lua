@@ -459,34 +459,39 @@ local GROUND_COLLISION_ANGLE_LOW = 45
 local GROUND_COLLISION_ANGLE_HIGH = 55
 
 local function BasicTraceHull(startPoint, endPoint, hitbox, traceMask)
-    local direction = (endPoint - startPoint):Normalize()
-    
-    -- Determine hitbox size and calculate offset
-    local hitboxSize = hitbox.max - hitbox.min
-    local hitboxOffset = hitboxSize * 0.5 * direction
+    local direction = NormalizeVector(endPoint - startPoint)
 
-    -- Adjust the start position based on hitbox size
-    local adjustedStart = startPoint + hitboxOffset
+    -- Calculate the diagonal length of the hitbox
+    local hitboxDiagonal = (hitbox[2] - hitbox[1]):Length()
+
+    -- Calculate the offset as half the diagonal length
+    local hitboxOffset = hitboxDiagonal * 0.5
+
+    -- Adjust the start position by extending it along the direction vector
+    local adjustedStart = startPoint + direction * hitboxOffset
 
     -- Determine the closest hitbox corner in the direction
     local closestHitboxCorner = Vector3(
-        direction.x > 0 and hitbox.max.x or hitbox.min.x,
-        direction.y > 0 and hitbox.max.y or hitbox.min.y,
-        hitbox.min.z -- Bottom corner
+        direction.x > 0 and hitbox[2].x or hitbox[1].x,
+        direction.y > 0 and hitbox[2].y or hitbox[1].y,
+        hitbox[1].z  -- Bottom corner
     )
 
     local closestCornerPoint = startPoint + closestHitboxCorner
     local sidewaysTrace = engine.TraceLine(adjustedStart, closestCornerPoint, traceMask)
 
-    if sidewaysTrace.Hit then
+    if sidewaysTrace.fraction < 1 then
         -- If there's a collision, do a trace from start to collision point
-        local collisionTrace = engine.TraceLine(startPoint, sidewaysTrace.HitPos, traceMask)
+        local collisionTrace = engine.TraceLine(startPoint, sidewaysTrace.endpos, traceMask)
         return collisionTrace
     else
         -- If no collision, return the original sideways trace result
         return sidewaysTrace
     end
 end
+
+
+
 
 
 -- Helper function for forward collision
@@ -573,8 +578,8 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
                     pos.x, pos.y = handleForwardCollision(vel, wallTrace, vUp)
                 end
             else
-               -- Forward collision
-                local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
+                -- Forward collision
+                local wallTrace = BasicTraceHull(lastP + vStep, pos + vStep, vHitbox, MASK_PLAYERSOLID_BRUSHONLY)
                 if wallTrace.fraction < 1 then
                     if wallTrace.entity and wallTrace.entity:IsValid() then
                         if wallTrace.entity:GetClass() == "CTFPlayer" then
@@ -794,14 +799,16 @@ local function CalculateTrickstab()
 
     -- Check the most likely side direction first
     local likelyAngleOffset = prioritizeRight and rightOffset or leftOffset
-  
+
     if simulateAndCheckBackstab(centralAngle + likelyAngleOffset) then
         return SimulateDash(createDirectionVector(centralAngle + likelyAngleOffset), SIMULATION_TICKS)
     end
 
-    -- Try the forward angle if both side and back angles fail
-    if simulateAndCheckBackstab(centralAngle) then
-        return SimulateDash(createDirectionVector(centralAngle), SIMULATION_TICKS)
+    if initialYawDiff > 90 then
+        -- Try the forward angle if both side and back angles fail
+        if simulateAndCheckBackstab(centralAngle) then
+            return SimulateDash(createDirectionVector(centralAngle), SIMULATION_TICKS)
+        end
     end
 
     -- Fail the function if all checks don't work
@@ -899,8 +906,6 @@ local function WalkTo(cmd, Pos, destination)
     cmd:SetSideMove(moveToDestination.y)
 end
 
-
-local warpdelay = 0
 local function AutoWarp_AutoBlink(cmd)
     local BackstabPos = CalculateTrickstab()
 
@@ -1137,10 +1142,6 @@ local function doDraw()
     
         if Menu.tabs.Main then
             ImMenu.BeginFrame(1)
-            Menu.Main.Active = ImMenu.Checkbox("Active", Menu.Main.Active)
-            ImMenu.EndFrame()
-
-            ImMenu.BeginFrame(1)
                 ImMenu.Text("                  Trickstab Modes")
             ImMenu.EndFrame()
             
@@ -1161,17 +1162,17 @@ local function doDraw()
         if Menu.tabs.Advanced then
 
             ImMenu.BeginFrame(1)
-            Menu.Advanced.Accuracy = ImMenu.Slider("Accuracy", Menu.Advanced.Accuracy, 1, SIMULATION_TICKS)
-            ImMenu.EndFrame()
-
-            ImMenu.BeginFrame(1)
-            Menu.Advanced.AutoWarp = ImMenu.Checkbox("Auto Warp", Menu.Advanced.AutoWarp)
-            Menu.Advanced.AutoRecharge = ImMenu.Checkbox("Auto Recharge", Menu.Advanced.AutoRecharge)
+            Menu.Advanced.Accuracy = ImMenu.Slider("Colision Accuracy", Menu.Advanced.Accuracy, 1, SIMULATION_TICKS)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
             Menu.Advanced.ColisionCheck = ImMenu.Checkbox("Colision Check", Menu.Advanced.ColisionCheck)
             Menu.Advanced.AdvancedPred = ImMenu.Checkbox("Advanced Pred", Menu.Advanced.AdvancedPred)
+            ImMenu.EndFrame()
+
+            ImMenu.BeginFrame(1)
+            Menu.Advanced.AutoWarp = ImMenu.Checkbox("Auto Warp", Menu.Advanced.AutoWarp)
+            Menu.Advanced.AutoRecharge = ImMenu.Checkbox("Auto Recharge", Menu.Advanced.AutoRecharge)
             ImMenu.EndFrame()
         end
         
