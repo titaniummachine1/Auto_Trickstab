@@ -185,7 +185,7 @@ local function NormalizeVector(vec)
     return Vector3(vec.x / length, vec.y / length, vec.z / length)
 end
 
-local function GetHitboxForwardDirection(player, idx)
+--[[local function GetHitboxForwardDirection(player, idx)
     local hitboxes = player:SetupBones()
 
     -- Process only the specified hitbox
@@ -217,7 +217,7 @@ local function GetHitboxForwardDirection(player, idx)
         return Vector3(rotatedForward.x / length, rotatedForward.y / length, rotatedForward.z / length)
     end
     return nil
-end
+end]]
 
 
 -- Function to update the cache for the local player and loadout slot
@@ -236,19 +236,22 @@ local function UpdateLocalPlayerCache()
     --AlignPos = nil
     return pLocal
 end
+
+local PastTicks = {{}}
 local function UpdateTarget()
     local allPlayers = entities.FindByClass("CTFPlayer")
     local bestTargetDetails = nil
-    local maxDistance = 220  -- Attack range plus warp distance
-    local bestDistance = maxDistance + 1  -- Initialize with a value larger than max distance
+    local maxAttackDistance = 222  -- Attack range plus warp distance
+    local maxBacktrackDistance = 670 --distance from what yo ucan kill backtracked pos at max
+    local bestDistance = maxAttackDistance + 1  -- Initialize with a value larger than max distance
     local found = false
     for _, player in pairs(allPlayers) do
-        if player:IsAlive() and not player:IsDormant() and not (player:GetTeamNumber() == pLocal:GetTeamNumber()) then
+        if pLocal and player:IsAlive() and not player:IsDormant() and not (player:GetTeamNumber() == pLocal:GetTeamNumber()) then --if player is even qualified for
             local playerAbsOrigin = player:GetAbsOrigin()
             local delta = pLocalPos - playerAbsOrigin
             local manhattanDistance = math.abs(delta.x) + math.abs(delta.y) + math.abs(delta.z)
 
-            if manhattanDistance <= maxDistance then
+            if manhattanDistance <= maxAttackDistance then
                 local hitboxidx = 4  -- Assuming hitboxID 4
                 local hitbox = player:GetHitboxes()[hitboxidx]
                 if hitbox then
@@ -913,7 +916,7 @@ local function AutoWarp_AutoBlink(cmd)
                 WalkTo(cmd, pLocalPos, BackstabPos)
             end
 
-            if Menu.Advanced.AutoWarp and warp.CanWarp() then
+            if Menu.Advanced.AutoWarp and warp.CanWarp() and warp.GetChargedTicks > 22 then
                 -- Trigger warp after changing direction and disable fakelag so warp works right
                 gui.SetValue("fake lag", 0)
                 warp.TriggerWarp()
