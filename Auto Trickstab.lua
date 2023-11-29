@@ -70,6 +70,7 @@ local cachedoffset = 25
 local BestYawDifference = 180
 local BestPosition
 local AlignPos = nil
+local tickRate = (1 / globals.TickInterval())
 
 local lastToggleTime = 0
 local Lbox_Menu_Open = true
@@ -152,6 +153,7 @@ end
 local function ManhattanDistance(pos1, pos2)
     return math.abs(pos1.x - pos2.x) + math.abs(pos1.y - pos2.y) + math.abs(pos1.z - pos2.z)
 end
+
 local M_RADPI = 180 / math.pi
 
 local function isNaN(x) return x ~= x end
@@ -275,7 +277,7 @@ local function UpdateTarget()
                         idx = player:GetIndex(),
                         entity = player,
                         Pos = playerAbsOrigin,
-                        FPos = playerAbsOrigin + player:EstimateAbsVelocity() * 0.030,
+                        FPos = playerAbsOrigin + player:EstimateAbsVelocity() * 0.015,
                         viewOffset = player:GetPropVector("localdata", "m_vecViewOffset[0]"),
                         hitboxPos = hitboxCenter,
                         hitboxForward = forwardVector,-- forwardVector,
@@ -308,7 +310,7 @@ local function NormalizeYaw(yaw)
     return yaw
 end
 
--- Function to calculate yaw angle between two points
+-- Function to calculate yaw angle between two points using math.atan2
 local function CalculateYawAngle(point1, direction)
     -- Determine a point along the forward direction
     local forwardPoint = point1 + direction * 104  -- 'someDistance' is an arbitrary distance
@@ -317,23 +319,8 @@ local function CalculateYawAngle(point1, direction)
     local dx = forwardPoint.x - point1.x
     local dy = forwardPoint.y - point1.y
 
-    -- Calculate the yaw angle
-    local yaw
-    if dx ~= 0 then
-        yaw = math.atan(dy / dx)
-    else
-        -- Handle the case where dx is 0 to avoid division by zero
-        if dy > 0 then
-            yaw = math.pi / 2  -- 90 degrees
-        else
-            yaw = -math.pi / 2  -- -90 degrees
-        end
-    end
-
-    -- Adjust yaw to correct quadrant
-    if dx < 0 then
-        yaw = yaw + math.pi  -- Adjust for second and third quadrants
-    end
+    -- Calculate the yaw angle using math.atan
+    local yaw = math.atan(dy, dx)
 
     return math.deg(yaw)  -- Convert radians to degrees
 end
@@ -341,22 +328,8 @@ end
 local function PositionYaw(source, dest)
     local delta = dest - source  -- delta vector from source to dest
 
-    local yaw
-    if delta.x ~= 0 then
-        yaw = math.atan(delta.y / delta.x)
-    else
-        -- Handle the case where dx is 0 to avoid division by zero
-        if delta.y > 0 then
-            yaw = math.pi / 2  -- 90 degrees
-        else
-            yaw = -math.pi / 2  -- -90 degrees
-        end
-    end
-
-    -- Adjust yaw to correct quadrant
-    if delta.x < 0 then
-        yaw = yaw + math.pi  -- Adjust for second and third quadrants
-    end
+    -- Use math.atan with two arguments for calculating yaw
+    local yaw = math.atan(delta.y, delta.x)
 
     return math.deg(yaw)  -- Convert radians to degrees
 end
@@ -549,8 +522,11 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
     else
         accuracy = math.max(1, math.min(Menu.Advanced.Accuracy or SIMULATION_TICKS, SIMULATION_TICKS))
     end
-    local tick_interval = simulationCache.tickInterval * (SIMULATION_TICKS / accuracy)
-    local gravity = simulationCache.gravity * (SIMULATION_TICKS / accuracy)
+
+    -- Calculate the tick interval based on the server's settings
+    local tick_interval = globals.TickInterval()
+
+    local gravity = simulationCache.gravity * tick_interval
     local stepSize = simulationCache.stepSize
     local vUp = Vector3(0, 0, 1)
     local vStep = Vector3(0, 0, stepSize / 2)
@@ -562,9 +538,7 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
     local lastG = (flags & 1 == 1)
     local Endpos = Vector3(0, 0, 0)
 
-
-    for i = 1, accuracy do -- Loop runs for the number of ticks determined by accuracy
-        
+    for i = 1, accuracy do
         local pos = lastP + lastV * tick_interval
         local vel = lastV
         local onGround = lastG
@@ -596,6 +570,11 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
                 end
             end
 
+                -- Adjust the starting position if it's too high
+            if lastP.z > (pLocalPos.z + simulationCache.stepSize) then
+                lastP.z = pLocalPos.z + simulationCache.stepSize
+            end
+
             -- Ground collision
             local downStep = onGround and vStep or Vector3()
             local groundTrace = engine.TraceHull(pos + vStep, pos - downStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
@@ -607,7 +586,7 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
 
         end
 
-        -- Apply gravity if not on ground
+         -- Apply gravity if not on ground
         if not onGround then
             vel.z = vel.z - gravity * tick_interval
         end
@@ -621,107 +600,55 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
     return Endpos
 end
 
--- Function to check if there's a collision between two spheres
-local function checkSphereCollision(center1, radius1, center2, radius2)
-    local distance = vector.Distance(center1, center2)
-    return distance < (radius1 + radius2)
-end
-
--- Function to check if there's a collision between two AABBs
 local function checkAABBAABBCollision(aabb1Min, aabb1Max, aabb2Min, aabb2Max)
     return (aabb1Min.x <= aabb2Max.x and aabb1Max.x >= aabb2Min.x) and
            (aabb1Min.y <= aabb2Max.y and aabb1Max.y >= aabb2Min.y) and
            (aabb1Min.z <= aabb2Max.z and aabb1Max.z >= aabb2Min.z)
 end
 
--- Function to calculate the right offset with additional collision simulation
-local function calculateRightOffset(enemyAABB, initialOffset)
-    local radius = 25.5  -- Assume this function correctly calculates the radius
-    local angleIncrement = 5
-    local maxIterations = 360 / angleIncrement
-    local initialDirection = NormalizeVector(TargetPlayer.FPos - pLocalPos) -- Corrected variable name
-    local startAngle = initialOffset or 0
-    local stepSize = 5  -- Step size for incremental movement
 
-    for i = 0, maxIterations do
-        local currentAngle = (startAngle + i * angleIncrement) % 360
+local function calculateSafeMovement(hitboxShared, initialAngle)
+    local maxDistance = 83.14 -- Maximum distance, equal to the diagonal length of the cube
+    local stepSize = 5 -- Adjust for smoother movement
+    local localPos = pLocalPos -- Assuming pLocalPos is a Vector3
+    local enemyPos = TargetPlayer.Pos -- Assuming TargetPlayer.Pos is a Vector3
+    local direction = NormalizeVector(enemyPos - localPos)
+    local movedDistance = 0
+    local angleMultiplier = initialAngle < 0 and -1 or 1 -- Determine direction based on initialAngle
+    local startAngle = math.abs(initialAngle)
+    local currentAngle = startAngle
+
+    -- Calculate the offset until the maximum distance or no collision is achieved
+    while movedDistance < maxDistance do
         local radianAngle = math.rad(currentAngle)
         local rotatedDirection = Vector3(
-            initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
-            initialDirection.x * math.sin(radianAngle) + initialDirection.y * math.cos(radianAngle),
+            direction.x * math.cos(radianAngle) - direction.y * math.sin(radianAngle) * angleMultiplier,
+            direction.x * math.sin(radianAngle) + direction.y * math.cos(radianAngle) * angleMultiplier,
             0
         )
 
-        local offsetVector = rotatedDirection * radius * 2
-        local testPos = pLocalPos + offsetVector
+        localPos = localPos + rotatedDirection * stepSize
+        movedDistance = movedDistance + stepSize
 
-        -- Check for sphere collision
-        if not checkSphereCollision(testPos, radius, TargetPlayer.FPos, radius) then
-            local clearPathFound = false
-            for step = 0, radius, stepSize do
-                local incrementalPos = pLocalPos + rotatedDirection * (radius - step)
-                local incrementalAABBMin = incrementalPos - Vector3(radius, radius, radius)
-                local incrementalAABBMax = incrementalPos + Vector3(radius, radius, radius)
+        -- Calculate AABB bounds for local and enemy
+        local testAABBMin = localPos + hitboxShared[1]
+        local testAABBMax = localPos + hitboxShared[2]
+        local enemyAABBmin = enemyPos + hitboxShared[1]
+        local enemyAABBmax = enemyPos + hitboxShared[2]
 
-                if not checkAABBAABBCollision(incrementalAABBMin, incrementalAABBMax, enemyAABB[1], enemyAABB[2]) then
-                    clearPathFound = true
-                    break
-                end
-            end
-
-            if clearPathFound then
-                -- cachedoffset = currentAngle  -- Uncomment if cachedoffset is used elsewhere
-                return currentAngle
-            end
+        -- Check for collision
+        if not checkAABBAABBCollision(testAABBMin, testAABBMax, enemyAABBmin, enemyAABBmax) then
+            return currentAngle * angleMultiplier -- Return the collision-free angle
         end
+
+        currentAngle = currentAngle + stepSize
     end
 
-    return nil -- No unobstructed path found
+    return nil -- Return nil if no collision-free angle is found
 end
 
 
--- Function to calculate the left offset with additional collision simulation
-local function calculateLeftOffset(enemyAABB, initialOffset)
-    local radius = 25.5 -- Radius for simulation
-    local angleIncrement = 5 -- Degrees to increment each simulation step
-    local maxIterations = 360 / angleIncrement -- Total number of iterations to cover 360 degrees
-    local initialDirection = NormalizeVector(TargetPlayer.FPos - pLocal:GetAbsOrigin())
-    local startAngle = initialOffset or 0 -- Starting angle for the simulation
 
-    for i = 0, maxIterations do
-        local currentAngle = (startAngle + i * angleIncrement) % 360 -- Increment angle to the right
-        local radianAngle = math.rad(currentAngle)
-        local rotatedDirection = Vector3(
-            initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
-            initialDirection.x * math.sin(radianAngle) + initialDirection.y * math.cos(radianAngle),
-            0
-        )
-
-        local offsetVector = rotatedDirection * radius * 2
-        local testPos = pLocal:GetAbsOrigin() + offsetVector
-
-        -- Check for sphere collision
-        if not checkSphereCollision(testPos, radius, TargetPlayer.FPos, radius) then
-            local clearPathFound = false
-            for step = 0, radius, 5 do -- Step size for incremental movement
-                local incrementalPos = pLocal:GetAbsOrigin() + rotatedDirection * (radius - step)
-                local incrementalAABBMin = incrementalPos - Vector3(radius, radius, radius)
-                local incrementalAABBMax = incrementalPos + Vector3(radius, radius, radius)
-
-                if not checkAABBAABBCollision(incrementalAABBMin, incrementalAABBMax, enemyAABB[1], enemyAABB[2]) then
-                    clearPathFound = true
-                    break
-                end
-            end
-
-            if clearPathFound then
-                return currentAngle
-            end
-        end
-    end
-
-    return nil -- No unobstructed path found
-end
 
 
 
@@ -746,19 +673,8 @@ local function CalculateTrickstab()
     local dx = targetPos.x - playerPos.x
     local dy = targetPos.y - playerPos.y
 
-    -- Calculate central angle using math.atan
-    local centralAngle
-    if dx ~= 0 then
-        centralAngle = math.deg(math.atan(dy / dx))
-        if dx < 0 then
-            centralAngle = centralAngle + 180
-        end
-    else
-        centralAngle = dy > 0 and 90 or (dy < 0 and -90 or 0)
-    end
-
-    local rightOffset = math.min(calculateRightOffset(vHitbox, 25), 100)
-    local leftOffset = math.max(calculateLeftOffset(vHitbox, -25), -100)
+    -- Calculate central angle using math.atan with two arguments
+    local centralAngle = math.deg(math.atan(dy, dx))
 
     local Disguised = pLocal:InCond(TFCond_Disguised)
     MAX_SPEED = Disguised and pLocal:EstimateAbsVelocity():Length() or 320
@@ -797,11 +713,19 @@ local function CalculateTrickstab()
     end
 
     -- Check the most likely side direction first
-    local likelyAngleOffset = prioritizeRight and rightOffset or leftOffset
+    local likelyAngleOffset
+    if prioritizeRight then
+        local rightOffset = math.min(calculateSafeMovement(vHitbox, 25), 100)
+        likelyAngleOffset = rightOffset
+    else
+        local leftOffset = math.max(calculateSafeMovement(vHitbox, -25), -100)
+        likelyAngleOffset = leftOffset
+    end
 
     if simulateAndCheckBackstab(centralAngle + likelyAngleOffset) then
         return SimulateDash(createDirectionVector(centralAngle + likelyAngleOffset), SIMULATION_TICKS)
     end
+
 
     if initialYawDiff > 90 then
         -- Try the forward angle if both side and back angles fail
@@ -934,7 +858,9 @@ local function AutoWarp_AutoBlink(cmd)
             -- Optional: Logic for handling when you can't backstab from a position]]
 end
 
-local RechargeDelay = 0
+local Latency = 0
+local lerp = 0
+local TimerRecharge = 0.33
 local function OnCreateMove(cmd)
     if UpdateLocalPlayerCache() == false or not pLocal then return end  -- Update local player data every tick
     endwarps = {}
@@ -944,16 +870,32 @@ local function OnCreateMove(cmd)
     local pWeapon = pLocal:GetPropEntity("m_hActiveWeapon")
     if not pWeapon or not pWeapon:IsMeleeWeapon() then return end -- Return if the local player doesn't have an active weaponend
 
+    local latOut = clientstate.GetLatencyOut()
+    local latIn = clientstate.GetLatencyIn()
+    lerp = client.GetConVar("cl_interp") or 0
+    Latency = (latOut + lerp) -- Calculate the reaction time in seconds
+
+    -- Scale up, floor, and scale down to limit to 4 decimal places
+    Latency = math.floor(Latency * tickRate * 1000 + 1) / 1000
+
+    -- If you need to convert the delay to ticks, do it after the above step
+    LatencyTicks = math.floor(Latency * tickRate + 1)
+
     --UpdateBacktrackData() --update position and angle data for backtrack --todo
+
+    if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 then
+        if TimerRecharge <= 0 then
+            TimerRecharge = 0.33 + Latency
+            warp.TriggerCharge()
+        end
+        print(Latency)
+            TimerRecharge = TimerRecharge - globals.TickInterval()
+    end
 
     TargetPlayer = nil
     local target = UpdateTarget()
-
     if not TargetPlayer then
         gui.SetValue("fake lag", 0)
-        if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 23 and not warp.CanWarp()then
-            warp.TriggerCharge()
-        end
         --TargetPlayer = {}
     else
         UpdateSimulationCache()
