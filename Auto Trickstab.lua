@@ -888,7 +888,6 @@ local function OnCreateMove(cmd)
             TimerRecharge = 0.33 + Latency
             warp.TriggerCharge()
         end
-        print(Latency)
             TimerRecharge = TimerRecharge - globals.TickInterval()
     end
 
