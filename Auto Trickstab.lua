@@ -326,12 +326,17 @@ local function CalculateYawAngle(point1, direction)
 end
 
 local function PositionYaw(source, dest)
-    local delta = dest - source  -- delta vector from source to dest
+    local delta = source - dest
 
-    -- Use math.atan with two arguments for calculating yaw
-    local yaw = math.atan(delta.y, delta.x)
+    local yaw = math.atan(delta.y / delta.x) * M_RADPI
 
-    return math.deg(yaw)  -- Convert radians to degrees
+    if delta.x >= 0 then
+        yaw = yaw + 180
+    end
+
+    if isNaN(yaw) then yaw = 0 end
+
+    return yaw
 end
 
 
@@ -430,52 +435,21 @@ local FORWARD_COLLISION_ANGLE = 55
 local GROUND_COLLISION_ANGLE_LOW = 45
 local GROUND_COLLISION_ANGLE_HIGH = 55
 
-local function BasicTraceHull(startPoint, endPoint, hitbox, traceMask)
-    local direction = NormalizeVector(endPoint - startPoint)
-
-    -- Calculate the diagonal length of the hitbox
-    local hitboxDiagonal = (hitbox[2] - hitbox[1]):Length()
-
-    -- Calculate the offset as half the diagonal length
-    local hitboxOffset = hitboxDiagonal * 0.5
-
-    -- Adjust the start position by extending it along the direction vector
-    local adjustedStart = startPoint + direction * hitboxOffset
-
-    -- Determine the closest hitbox corner in the direction
-    local closestHitboxCorner = Vector3(
-        direction.x > 0 and hitbox[2].x or hitbox[1].x,
-        direction.y > 0 and hitbox[2].y or hitbox[1].y,
-        hitbox[1].z  -- Bottom corner
-    )
-
-    local closestCornerPoint = startPoint + closestHitboxCorner
-    local sidewaysTrace = engine.TraceLine(adjustedStart, closestCornerPoint, traceMask)
-
-    if sidewaysTrace.fraction < 1 then
-        -- If there's a collision, do a trace from start to collision point
-        local collisionTrace = engine.TraceLine(startPoint, sidewaysTrace.endpos, traceMask)
-        return collisionTrace
-    else
-        -- If no collision, return the original sideways trace result
-        return sidewaysTrace
-    end
-end
-
-
-
-
-
 -- Helper function for forward collision
-local function handleForwardCollision(vel, wallTrace, vUp)
+local function handleForwardCollision(vel, wallTrace)
     local normal = wallTrace.plane
-    local angle = math.deg(math.acos(normal:Dot(vUp)))
+    local angle = math.deg(math.acos(normal:Dot(Vector3(0, 0, 1))))
+
+     -- Adjust velocity if angle is greater than forward collision angle
     if angle > FORWARD_COLLISION_ANGLE then
+        -- The wall is steep, adjust velocity to prevent moving into the wall
         local dot = vel:Dot(normal)
         vel = vel - normal * dot
     end
-    return wallTrace.endpos.x, wallTrace.endpos.y
+
+    return wallTrace.endpos.x, wallTrace.endpos.y, alreadyWithinStep
 end
+
 
 -- Helper function for ground collision
 local function handleGroundCollision(vel, groundTrace, vUp)
@@ -548,11 +522,11 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
                 -- Forward collision
                 local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
                 if wallTrace.fraction < 1 then
-                    pos.x, pos.y = handleForwardCollision(vel, wallTrace, vUp)
+                    pos.x, pos.y = handleForwardCollision(vel, wallTrace)
                 end
             else
                 -- Forward collision
-                local wallTrace = BasicTraceHull(lastP + vStep, pos + vStep, vHitbox, MASK_PLAYERSOLID_BRUSHONLY)
+                local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY) --local wallTrace = BasicTraceHull(lastP + vStep, pos + vStep, vHitbox, MASK_PLAYERSOLID_BRUSHONLY)
                 if wallTrace.fraction < 1 then
                     if wallTrace.entity and wallTrace.entity:IsValid() then
                         if wallTrace.entity:GetClass() == "CTFPlayer" then
@@ -561,18 +535,13 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
                             break
                         else
                             -- Handle collision with non-player entities
-                            pos.x, pos.y = handleForwardCollision(vel, wallTrace, vUp)
+                            pos.x, pos.y = handleForwardCollision(vel, wallTrace)
                         end
                     else
                         -- Handle collision when no valid entity is involved
-                        pos.x, pos.y = handleForwardCollision(vel, wallTrace, vUp)
+                        pos.x, pos.y = handleForwardCollision(vel, wallTrace)
                     end
                 end
-            end
-
-                -- Adjust the starting position if it's too high
-            if lastP.z > (pLocalPos.z + simulationCache.stepSize) then
-                lastP.z = pLocalPos.z + simulationCache.stepSize
             end
 
             -- Ground collision
@@ -606,51 +575,56 @@ local function checkAABBAABBCollision(aabb1Min, aabb1Max, aabb2Min, aabb2Max)
            (aabb1Min.z <= aabb2Max.z and aabb1Max.z >= aabb2Min.z)
 end
 
+-- Function to check if there's a collision between two spheres
+local function checkSphereCollision(center1, radius1, center2, radius2)
+    local distance = vector.Distance(center1, center2)
+    return distance < (radius1 + radius2)
+end
 
-local function calculateSafeMovement(hitboxShared, initialAngle)
-    local maxDistance = 83.14 -- Maximum distance, equal to the diagonal length of the cube
-    local stepSize = 5 -- Adjust for smoother movement
-    local localPos = pLocalPos -- Assuming pLocalPos is a Vector3
-    local enemyPos = TargetPlayer.Pos -- Assuming TargetPlayer.Pos is a Vector3
-    local direction = NormalizeVector(enemyPos - localPos)
-    local movedDistance = 0
-    local angleMultiplier = initialAngle < 0 and -1 or 1 -- Determine direction based on initialAngle
-    local startAngle = math.abs(initialAngle)
-    local currentAngle = startAngle
+-- Function to calculate the right offset with additional collision simulation
+local function calculateSafeMovement(enemyAABB, initialOffset)
+    local radius = 25.5  -- Assume this function correctly calculates the radius
+    local angleIncrement = 5
+    local maxIterations = 360 / angleIncrement
+    local initialDirection = NormalizeVector(TargetPlayer.Pos - pLocalPos) -- Corrected variable name
+    local startAngle = initialOffset or 0
+    local stepSize = 5  -- Step size for incremental movement
 
-    -- Calculate the offset until the maximum distance or no collision is achieved
-    while movedDistance < maxDistance do
+    for i = 0, maxIterations do
+        local currentAngle = (startAngle + i * angleIncrement) % 360
         local radianAngle = math.rad(currentAngle)
         local rotatedDirection = Vector3(
-            direction.x * math.cos(radianAngle) - direction.y * math.sin(radianAngle) * angleMultiplier,
-            direction.x * math.sin(radianAngle) + direction.y * math.cos(radianAngle) * angleMultiplier,
+            initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
+            initialDirection.x * math.sin(radianAngle) + initialDirection.y * math.cos(radianAngle),
             0
         )
 
-        localPos = localPos + rotatedDirection * stepSize
-        movedDistance = movedDistance + stepSize
+        local offsetVector = rotatedDirection * radius * 2
+        local testPos = pLocalPos + offsetVector
 
-        -- Calculate AABB bounds for local and enemy
-        local testAABBMin = localPos + hitboxShared[1]
-        local testAABBMax = localPos + hitboxShared[2]
-        local enemyAABBmin = enemyPos + hitboxShared[1]
-        local enemyAABBmax = enemyPos + hitboxShared[2]
+        -- Check for sphere collision
+        if not checkSphereCollision(testPos, radius, TargetPlayer.Pos, radius) then
+            local clearPathFound = false
+            for step = 0, radius, stepSize do
+                local incrementalPos = pLocalPos + rotatedDirection * (radius - step)
+                local incrementalAABBMin = incrementalPos - Vector3(radius, radius, radius)
+                local incrementalAABBMax = incrementalPos + Vector3(radius, radius, radius)
 
-        -- Check for collision
-        if not checkAABBAABBCollision(testAABBMin, testAABBMax, enemyAABBmin, enemyAABBmax) then
-            return currentAngle * angleMultiplier -- Return the collision-free angle
+                if not checkAABBAABBCollision(incrementalAABBMin, incrementalAABBMax, enemyAABB[1], enemyAABB[2]) then
+                    clearPathFound = true
+                    break
+                end
+            end
+
+            if clearPathFound then
+                -- cachedoffset = currentAngle  -- Uncomment if cachedoffset is used elsewhere
+                return currentAngle
+            end
         end
-
-        currentAngle = currentAngle + stepSize
     end
 
-    return nil -- Return nil if no collision-free angle is found
+    return nil -- No unobstructed path found
 end
-
-
-
-
-
 
 
 
@@ -775,16 +749,16 @@ end
 ---@param destination Vector3
 local function WalkTo(cmd, Pos, destination)
     -- Check if Warp is possible and player's velocity is high enough
-    if pLocal and warp.CanWarp() and pLocal:EstimateAbsVelocity():Length() > 319 then
+    if pLocal and pLocal:EstimateAbsVelocity():Length() > 319 then
         local forwardMove = cmd:GetForwardMove()
         local sideMove = cmd:GetSideMove()
-        
+
         -- Normalize move values for diagonal movement
         if forwardMove ~= 0 and sideMove ~= 0 then
             forwardMove = forwardMove / math.sqrt(2)  -- Normalize for diagonal
             sideMove = sideMove / math.sqrt(2)        -- Normalize for diagonal
         end
-        
+
         -- Determine the movement direction
         local moveDirectionAngle = 0
         if forwardMove > 0 then
@@ -860,7 +834,7 @@ end
 
 local Latency = 0
 local lerp = 0
-local TimerRecharge = 0.33
+local TimerRecharge = 0.44
 local function OnCreateMove(cmd)
     if UpdateLocalPlayerCache() == false or not pLocal then return end  -- Update local player data every tick
     endwarps = {}
@@ -883,14 +857,6 @@ local function OnCreateMove(cmd)
 
     --UpdateBacktrackData() --update position and angle data for backtrack --todo
 
-    if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 then
-        if TimerRecharge <= 0 then
-            TimerRecharge = 0.33 + Latency
-            warp.TriggerCharge()
-        end
-            TimerRecharge = TimerRecharge - globals.TickInterval()
-    end
-
     TargetPlayer = nil
     local target = UpdateTarget()
     if not TargetPlayer then
@@ -910,6 +876,14 @@ local function OnCreateMove(cmd)
     
         elseif Menu.Main.TrickstabModeSelected == 6 then
 
+        end
+    end
+
+    if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 then
+        TimerRecharge = TimerRecharge - globals.TickInterval()
+        if TimerRecharge <= 0 then
+            TimerRecharge = 0.44 + Latency
+            warp.TriggerCharge()
         end
     end
 end
