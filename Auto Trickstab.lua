@@ -847,13 +847,10 @@ local function OnCreateMove(cmd)
     local latOut = clientstate.GetLatencyOut()
     local latIn = clientstate.GetLatencyIn()
     lerp = client.GetConVar("cl_interp") or 0
-    Latency = (latOut + lerp) -- Calculate the reaction time in seconds
+    Latency = (latOut + latIn + lerp) -- Calculate the reaction time in seconds
 
     -- Scale up, floor, and scale down to limit to 4 decimal places
     Latency = math.floor(Latency * tickRate * 1000 + 1) / 1000
-
-    -- If you need to convert the delay to ticks, do it after the above step
-    LatencyTicks = math.floor(Latency * tickRate + 1)
 
     --UpdateBacktrackData() --update position and angle data for backtrack --todo
 
