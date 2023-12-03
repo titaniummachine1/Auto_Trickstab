@@ -855,6 +855,8 @@ local function AutoWarp_AutoBlink(cmd)
             else
                 gui.SetValue("fake lag", 0)
             end
+        elseif Menu.Main.AutoAlign and positions[24] then
+            WalkTo(cmd, pLocal:GetAbsOrigin(), positions[24])
         end
         --[[else
             endwarps[angle] = {point[1], false}
@@ -926,7 +928,7 @@ local function OnCreateMove(cmd)
 
         if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 and not warp.CanWarp() then
             globalCounter = globalCounter + 1
-            if globalCounter >= 33 + Latency or killed then
+            if globalCounter >= 132 + Latency or killed then
                 warp.TriggerCharge()
                 globalCounter = 0  -- Reset the global counter
                 killed = false  -- Reset the killed flag
