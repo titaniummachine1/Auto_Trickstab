@@ -485,8 +485,6 @@ local function UpdateSimulationCache()
     simulationCache.flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
 end
 
-
-
 -- Simulates movement in a specified direction vector for a player over a given number of ticks
 local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
     local BACKTRACK_ACCURACY = 1
@@ -569,66 +567,103 @@ local function SimulateDash(simulatedVelocity, ticks, isBacktrack)
     return Endpos
 end
 
-local function checkAABBAABBCollision(aabb1Min, aabb1Max, aabb2Min, aabb2Max)
-    return (aabb1Min.x <= aabb2Max.x and aabb1Max.x >= aabb2Min.x) and
-           (aabb1Min.y <= aabb2Max.y and aabb1Max.y >= aabb2Min.y) and
-           (aabb1Min.z <= aabb2Max.z and aabb1Max.z >= aabb2Min.z)
+-- Function to rotate a 2D vector (x, y) around the Z-axis by a given yaw angle in degrees
+local function RotateVector(vector, yawDegrees)
+    local radian = math.rad(yawDegrees)
+    return Vector3(
+        vector.x * math.cos(radian) - vector.y * math.sin(radian),
+        vector.x * math.sin(radian) + vector.y * math.cos(radian),
+        vector.z  -- Maintain the original Z-component
+    )
 end
 
--- Function to check if there's a collision between two spheres
-local function checkSphereCollision(center1, radius1, center2, radius2)
-    local distance = vector.Distance(center1, center2)
-    return distance < (radius1 + radius2)
-end
+-- Simulates movement in a specified direction vector for a player over a given number of ticks
+local function SimulateSideStab(simulatedVelocity, ticks, initialAngle)
+    -- Initialization
+    local currentAngleAdjustment = 0  -- Current cumulative angle adjustment
+    local tickInterval = globals.TickInterval()  -- Time interval per simulation tick
+    local BACKTRACK_ACCURACY = 1
+    local accuracy = Menu.Advanced.Accuracy
+    local stepangle = 1
+    local angleAdjustment = initialAngle > 0 and stepangle or -stepangle  -- Adjust angle based on initial angle
+    local angleAdjustmentStep = initialAngle > 0 and stepangle or -stepangle  -- Adjust angle based on initial angle
+    local initialDirection = NormalizeVector(simulatedVelocity)
 
--- Function to calculate the right offset with additional collision simulation
-local function calculateSafeMovement(enemyAABB, initialOffset)
-    local radius = 25.5  -- Assume this function correctly calculates the radius
-    local angleIncrement = 5
-    local maxIterations = 360 / angleIncrement
-    local initialDirection = NormalizeVector(TargetPlayer.Pos - pLocalPos) -- Corrected variable name
-    local startAngle = initialOffset or 0
-    local stepSize = 5  -- Step size for incremental movement
 
-    for i = 0, maxIterations do
-        local currentAngle = (startAngle + i * angleIncrement) % 360
-        local radianAngle = math.rad(currentAngle)
-        local rotatedDirection = Vector3(
-            initialDirection.x * math.cos(radianAngle) - initialDirection.y * math.sin(radianAngle),
-            initialDirection.x * math.sin(radianAngle) + initialDirection.y * math.cos(radianAngle),
-            0
-        )
+    -- Calculate the tick interval based on the server's settings
+    local tick_interval = globals.TickInterval()
 
-        local offsetVector = rotatedDirection * radius * 2
-        local testPos = pLocalPos + offsetVector
+    local gravity = simulationCache.gravity * tick_interval
+    local stepSize = simulationCache.stepSize
+    local vUp = Vector3(0, 0, 1)
+    local vStep = Vector3(0, 0, stepSize / 2)
 
-        -- Check for sphere collision
-        if not checkSphereCollision(testPos, radius, TargetPlayer.Pos, radius) then
-            local clearPathFound = false
-            for step = 0, radius, stepSize do
-                local incrementalPos = pLocalPos + rotatedDirection * (radius - step)
-                local incrementalAABBMin = incrementalPos - Vector3(radius, radius, radius)
-                local incrementalAABBMax = incrementalPos + Vector3(radius, radius, radius)
+    local localPositions = {}
+    local lastP = pLocalPos
+    local lastV = simulatedVelocity
+    local flags = simulationCache.flags
+    local lastG = (flags & 1 == 1)
+    local Endpos = Vector3(0, 0, 0)
+    local radius = (pLocalPos - lastP):Length()
 
-                if not checkAABBAABBCollision(incrementalAABBMin, incrementalAABBMax, enemyAABB[1], enemyAABB[2]) then
-                    clearPathFound = true
-                    break
-                end
-            end
 
-            if clearPathFound then
-                -- cachedoffset = currentAngle  -- Uncomment if cachedoffset is used elsewhere
-                return currentAngle
+
+    for i = 1, accuracy do
+        local pos = lastP + lastV * tick_interval
+        local vel = lastV
+        local onGround = lastG
+
+            
+        -- Collision check
+        local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
+        if wallTrace.fraction < 1 then
+            if wallTrace.entity and wallTrace.entity:IsValid() and wallTrace.entity:GetClass() == "CTFPlayer" and wallTrace.entity ~= pLocal then
+                -- Collision with another player detected, adjust the direction
+                currentAngleAdjustment = currentAngleAdjustment + angleAdjustmentStep
+                local newAngle = math.rad(PositionYaw(pLocalPos, pos) + currentAngleAdjustment)
+                local adjustedDirection = Vector3(math.cos(newAngle), math.sin(newAngle), 0)
+
+                -- Adjust position and velocity
+                vel = adjustedDirection * vel:Length()
+                pos = pLocalPos + adjustedDirection * (pos - pLocalPos):Length()
+            else
+                -- Handle non-player collisions or no valid entity involved
+                pos.x, pos.y = handleForwardCollision(vel, wallTrace)
             end
         end
+
+            -- Ground collision
+            local downStep = onGround and vStep or Vector3()
+            local groundTrace = engine.TraceHull(pos + vStep, pos - downStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
+            if groundTrace.fraction < 1 then
+                pos, onGround = handleGroundCollision(vel, groundTrace, vUp)
+            else
+                onGround = false
+            end
+
+         -- Apply gravity if not on ground
+        if not onGround then
+            vel.z = vel.z - gravity * tick_interval
+        end
+
+        lastP, lastV, lastG = pos, vel, onGround
+        table.insert(positions, lastP)  -- Store position for this tick in the local variable
+        Endpos = lastP
     end
 
-    return nil -- No unobstructed path found
+    -- Final trace check from pLocalPos to Endpos for additional validation
+    local finalTrace = engine.TraceHull(pLocalPos, Endpos, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
+    if finalTrace.fraction < 1 and finalTrace.entity == "CTFWorld" or finalTrace.fraction < 1 and not finalTrace.entity == "CTFWorld" and finalTrace.entity.GetTeamNumber() == TargetPlayer.entity.GetTeamNumber() then
+        -- The trace found an obstruction, indicating the final position is not valid
+        return nil -- or handle accordingly
+    else
+        -- Path is clear, return the calculated end position
+        table.insert(endwarps, {Endpos, CheckBackstab(Endpos)})  -- Store position for this tick in the local variable
+        return Endpos
+    end
 end
 
 
-
-local cleartiemr = 50
 
 local function CalculateTrickstab()
     -- Ensure pLocal and TargetPlayer are valid and have position data
@@ -644,9 +679,10 @@ local function CalculateTrickstab()
 
     local playerPos = pLocal:GetAbsOrigin()
     local targetPos = TargetPlayer.FPos
-    local dx = targetPos.x - playerPos.x
-    local dy = targetPos.y - playerPos.y
+    local dx = targetPos.x - pLocalPos.x
+    local dy = targetPos.y - pLocalPos.y
 
+    
     -- Calculate central angle using math.atan with two arguments
     local centralAngle = math.deg(math.atan(dy, dx))
 
@@ -676,30 +712,26 @@ local function CalculateTrickstab()
     local spyYaw = PositionYaw(playerPos, targetPos)
     local initialYawDiff = NormalizeYaw(spyYaw - enemyYaw)
 
-    local prioritizeRight = initialYawDiff < 0
-
-    if initialYawDiff > 80 then
+    if initialYawDiff > 90 then
         -- Check the back angle next
-        local backAngle = PositionYaw(playerPos, TargetPlayer.backPoint)
+        local backAngle = PositionYaw(pLocalPos, TargetPlayer.backPoint)
         if simulateAndCheckBackstab(backAngle) then
             return SimulateDash(createDirectionVector(backAngle), SIMULATION_TICKS)
         end
     end
 
-    -- Check the most likely side direction first
+    -- Use SimulateSideStab for likely angle
     local likelyAngleOffset
-    if prioritizeRight then
-        local rightOffset = math.min(calculateSafeMovement(vHitbox, 25), 100)
-        likelyAngleOffset = rightOffset
+    if initialYawDiff < 0 then
+        likelyAngleOffset = 25  -- Adjust as needed
     else
-        local leftOffset = math.max(calculateSafeMovement(vHitbox, -25), -100)
-        likelyAngleOffset = leftOffset
+        likelyAngleOffset = -25   -- Adjust as needed
     end
 
-    if simulateAndCheckBackstab(centralAngle + likelyAngleOffset) then
-        return SimulateDash(createDirectionVector(centralAngle + likelyAngleOffset), SIMULATION_TICKS)
+    local sideStabPos = SimulateSideStab(createDirectionVector(centralAngle + likelyAngleOffset), SIMULATION_TICKS, likelyAngleOffset)
+    if sideStabPos and CheckBackstab(sideStabPos) then
+        return sideStabPos
     end
-
 
     if initialYawDiff > 90 then
         -- Try the forward angle if both side and back angles fail
@@ -832,9 +864,23 @@ local function AutoWarp_AutoBlink(cmd)
             -- Optional: Logic for handling when you can't backstab from a position]]
 end
 
+local killed = false
+local function damageLogger(event)
+    if (event:GetName() == 'player_hurt' ) then
+        local victim = entities.GetByUserID(event:GetInt("userid"))
+        local attacker = entities.GetByUserID(event:GetInt("attacker"))
+
+        if (attacker == nil or pLocal:GetIndex() ~= attacker:GetIndex()) then
+            return
+        end
+        killed = true --raprot kill now safely can recharge
+    end
+end
+
 local Latency = 0
 local lerp = 0
-local TimerRecharge = 0.44
+local globalCounter = 0
+
 local function OnCreateMove(cmd)
     if UpdateLocalPlayerCache() == false or not pLocal then return end  -- Update local player data every tick
     endwarps = {}
@@ -843,14 +889,6 @@ local function OnCreateMove(cmd)
     -- Get the local player's active weapon
     local pWeapon = pLocal:GetPropEntity("m_hActiveWeapon")
     if not pWeapon or not pWeapon:IsMeleeWeapon() then return end -- Return if the local player doesn't have an active weaponend
-
-    local latOut = clientstate.GetLatencyOut()
-    local latIn = clientstate.GetLatencyIn()
-    lerp = client.GetConVar("cl_interp") or 0
-    Latency = (latOut + latIn + lerp) -- Calculate the reaction time in seconds
-
-    -- Scale up, floor, and scale down to limit to 4 decimal places
-    Latency = math.floor(Latency * tickRate * 1000 + 1) / 1000
 
     --UpdateBacktrackData() --update position and angle data for backtrack --todo
 
@@ -876,13 +914,25 @@ local function OnCreateMove(cmd)
         end
     end
 
-    if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 then
-        TimerRecharge = TimerRecharge - globals.TickInterval()
-        if TimerRecharge <= 0 then
-            TimerRecharge = 0.44 + Latency
-            warp.TriggerCharge()
+        -- Calculate latency in seconds
+        local latOut = clientstate.GetLatencyOut()
+        local latIn = clientstate.GetLatencyIn()
+        lerp = client.GetConVar("cl_interp") or 0
+        Latency = Conversion.Time_to_Ticks(latOut + latIn + lerp)
+
+            -- Set a dynamic delay in ticks based on the current latency
+        local rechargeDelayTicks = Conversion.Time_to_Ticks(Latency)
+        local TimerRecharge = Latency  -- Initialize TimerRecharge with the current latency
+
+        if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 and not warp.CanWarp() then
+            globalCounter = globalCounter + 1
+            if globalCounter >= 33 + Latency or killed then
+                warp.TriggerCharge()
+                globalCounter = 0  -- Reset the global counter
+                killed = false  -- Reset the killed flag
+                TimerRecharge = Latency  -- Reset the TimerRecharge to the current latency
+            end
         end
-    end
 end
 
 local consolas = draw.CreateFont("Consolas", 17, 500)
@@ -1117,11 +1167,13 @@ end
 callbacks.Unregister("CreateMove", "AtSM_CreateMove")            -- Unregister the "CreateMove" callback
 callbacks.Unregister("Unload", "AtSM_Unload")                    -- Unregister the "Unload" callback
 callbacks.Unregister("Draw", "AtSM_Draw")                        -- Unregister the "Draw" callback
+callbacks.Unregister("FireGameEvent", "adaamageLogger")
 
 --[[ Register callbacks ]]--
 callbacks.Register("CreateMove", "AtSM_CreateMove", OnCreateMove)             -- Register the "CreateMove" callback
 callbacks.Register("Unload", "AtSM_Unload", OnUnload)                         -- Register the "Unload" callback
 callbacks.Register("Draw", "AtSM_Draw", doDraw)                               -- Register the "Draw" callback
+callbacks.Register("FireGameEvent", "adaamageLogger", damageLogger)
 
 --[[ Play sound when loaded ]]--
 client.Command('play "ui/buttonclick"', true) -- Play the "buttonclick" sound when the script is loaded
