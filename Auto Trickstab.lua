@@ -779,9 +779,9 @@ end
 -- Walks to the destination and sets the global move direction
 ---@param cmd UserCmd
 ---@param destination Vector3
-local function WalkTo(cmd, Pos, destination)
+local function WalkTo(cmd, Pos, destination, AdjustView)
     -- Check if Warp is possible and player's velocity is high enough
-    if pLocal and pLocal:EstimateAbsVelocity():Length() > 319 then
+    if AdjustView and AdjustView == true and pLocal and pLocal:EstimateAbsVelocity():Length() > 319 then
         local forwardMove = cmd:GetForwardMove()
         local sideMove = cmd:GetSideMove()
 
@@ -843,7 +843,7 @@ local function AutoWarp_AutoBlink(cmd)
     if BackstabPos then
             if Menu.Main.AutoWalk then
                 -- Walk to the backstab position if AutoWalk is enabled
-                WalkTo(cmd, pLocalPos, BackstabPos)
+                WalkTo(cmd, pLocalPos, BackstabPos, true)
             end
 
             if Menu.Advanced.AutoWarp and warp.CanWarp() and warp.GetChargedTicks() > 22 then
@@ -856,14 +856,8 @@ local function AutoWarp_AutoBlink(cmd)
                 gui.SetValue("fake lag", 0)
             end
         elseif Menu.Main.AutoAlign and positions[24] then
-            WalkTo(cmd, pLocal:GetAbsOrigin(), positions[24])
+            WalkTo(cmd, pLocalPos, positions[24], false)
         end
-        --[[else
-            endwarps[angle] = {point[1], false}
-            if Menu.Main.AutoAlign then
-                WalkTo(cmd, pLocal:GetAbsOrigin(), AutoAlign)
-            end
-            -- Optional: Logic for handling when you can't backstab from a position]]
 end
 
 local killed = false
