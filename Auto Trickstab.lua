@@ -39,7 +39,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
     Advanced = {
         ColisionCheck = true,
         AdvancedPred = true,
-        Accuracy = 25,
+        Accuracy = 24,
         sidestabTolerance = 1,
         AutoWarp = true,
         AutoRecharge = true,
@@ -67,7 +67,7 @@ local endwarps = {}
 -- Constants
 local BACKSTAB_RANGE = 66  -- Hammer units
 local BACKSTAB_ANGLE = 160  -- Degrees in radians for dot product calculation
-local cachedoffset = 25
+local cachedoffset = 24
 local BestYawDifference = 180
 local BestPosition
 local AlignPos = nil
@@ -430,7 +430,7 @@ end
 
 -- Constants
 local MAX_SPEED = 320  -- Maximum speed
-local SIMULATION_TICKS = 25  -- Number of ticks for simulation
+local SIMULATION_TICKS = 24  -- Number of ticks for simulation
 local positions = {}
 
 local FORWARD_COLLISION_ANGLE = 55
@@ -652,7 +652,7 @@ local function SimulateSideStab(initialAngle, centralAngle)
         end
     end
 
-    return SimulateDash(createDirectionVector(centralAngle + ( initialAngle < 0 and -90 or 90 )), 25)
+    return SimulateDash(createDirectionVector(centralAngle + ( initialAngle < 0 and -90 or 90 )), 24)
 end
 
 
