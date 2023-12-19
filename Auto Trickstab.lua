@@ -20,7 +20,7 @@ local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 2.6, -- dont touch this, this is just for managing the config version
+    Version = 2.7, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -40,6 +40,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
         ColisionCheck = true,
         AdvancedPred = true,
         Accuracy = 25,
+        sidestabTolerance = 1,
         AutoWarp = true,
         AutoRecharge = true,
     },
@@ -134,6 +135,7 @@ local function LoadCFG(folder_name)
             printc( 0, 255, 140, 255, "["..os.date("%H:%M:%S").."] Loaded from ".. tostring(fullPath))
             return chunk()
         else
+            CreateCFG([[LBOX Auto trickstab lua]], Menu)
             print("Error loading configuration:", err)
         end
     end
@@ -243,7 +245,7 @@ local PastTicks = {{}}
 local function UpdateTarget()
     local allPlayers = entities.FindByClass("CTFPlayer")
     local bestTargetDetails = nil
-    local maxAttackDistance = 222  -- Attack range plus warp distance
+    local maxAttackDistance = 225  -- Attack range plus warp distance
     local maxBacktrackDistance = 670 --distance from what yo ucan kill backtracked pos at max
     local bestDistance = maxAttackDistance + 1  -- Initialize with a value larger than max distance
     local found = false
@@ -346,8 +348,8 @@ local function CheckYawDelta(angle1, angle2)
     local normalizedDifference = NormalizeYaw(difference)
 
     -- Assuming you want to check if within a 120-degree arc to the right and a 40-degree arc to the left of the back
-    local withinRightArc = normalizedDifference > -60 and normalizedDifference <= 0
-    local withinLeftArc = normalizedDifference < 90 and normalizedDifference >= 0
+    local withinRightArc = normalizedDifference > -70 and normalizedDifference <= 0
+    local withinLeftArc = normalizedDifference < 80 and normalizedDifference >= 0
 
     return withinRightArc or withinLeftArc
 end
@@ -577,92 +579,81 @@ local function RotateVector(vector, yawDegrees)
     )
 end
 
--- Simulates movement in a specified direction vector for a player over a given number of ticks
-local function SimulateSideStab(simulatedVelocity, ticks, initialAngle)
-    -- Initialization
-    local currentAngleAdjustment = 0  -- Current cumulative angle adjustment
-    local tickInterval = globals.TickInterval()  -- Time interval per simulation tick
-    local BACKTRACK_ACCURACY = 1
-    local accuracy = Menu.Advanced.Accuracy
-    local stepangle = 1
-    local angleAdjustment = initialAngle > 0 and stepangle or -stepangle  -- Adjust angle based on initial angle
-    local angleAdjustmentStep = initialAngle > 0 and stepangle or -stepangle  -- Adjust angle based on initial angle
-    local initialDirection = NormalizeVector(simulatedVelocity)
-
-
-    -- Calculate the tick interval based on the server's settings
-    local tick_interval = globals.TickInterval()
-
-    local gravity = simulationCache.gravity * tick_interval
-    local stepSize = simulationCache.stepSize
-    local vUp = Vector3(0, 0, 1)
-    local vStep = Vector3(0, 0, stepSize / 2)
-
-    local localPositions = {}
-    local lastP = pLocalPos
-    local lastV = simulatedVelocity
-    local flags = simulationCache.flags
-    local lastG = (flags & 1 == 1)
-    local Endpos = Vector3(0, 0, 0)
-    local radius = (pLocalPos - lastP):Length()
-
-
-
-    for i = 1, accuracy do
-        local pos = lastP + lastV * tick_interval
-        local vel = lastV
-        local onGround = lastG
-
-            
-        -- Collision check
-        local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
-        if wallTrace.fraction < 1 then
-            if wallTrace.entity and wallTrace.entity:IsValid() and wallTrace.entity:GetClass() == "CTFPlayer" and wallTrace.entity ~= pLocal then
-                -- Collision with another player detected, adjust the direction
-                currentAngleAdjustment = currentAngleAdjustment + angleAdjustmentStep
-                local newAngle = math.rad(PositionYaw(pLocalPos, pos) + currentAngleAdjustment)
-                local adjustedDirection = Vector3(math.cos(newAngle), math.sin(newAngle), 0)
-
-                -- Adjust position and velocity
-                vel = adjustedDirection * vel:Length()
-                pos = pLocalPos + adjustedDirection * (pos - pLocalPos):Length()
-            else
-                -- Handle non-player collisions or no valid entity involved
-                pos.x, pos.y = handleForwardCollision(vel, wallTrace)
-            end
-        end
-
-            -- Ground collision
-            local downStep = onGround and vStep or Vector3()
-            local groundTrace = engine.TraceHull(pos + vStep, pos - downStep, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
-            if groundTrace.fraction < 1 then
-                pos, onGround = handleGroundCollision(vel, groundTrace, vUp)
-            else
-                onGround = false
-            end
-
-         -- Apply gravity if not on ground
-        if not onGround then
-            vel.z = vel.z - gravity * tick_interval
-        end
-
-        lastP, lastV, lastG = pos, vel, onGround
-        table.insert(positions, lastP)  -- Store position for this tick in the local variable
-        Endpos = lastP
+    -- Function to create a direction vector from an angle
+    local function createDirectionVector(angle)
+        local radianAngle = math.rad(angle)
+        return Vector3(math.cos(radianAngle), math.sin(radianAngle), 0) * 320
     end
 
-    -- Final trace check from pLocalPos to Endpos for additional validation
-    local finalTrace = engine.TraceHull(pLocalPos, Endpos, vHitbox[1], vHitbox[2], MASK_PLAYERSOLID_BRUSHONLY)
-    if finalTrace.fraction < 1 and finalTrace.entity == "CTFWorld" or finalTrace.fraction < 1 and not finalTrace.entity == "CTFWorld" and finalTrace.entity.GetTeamNumber() == TargetPlayer.entity.GetTeamNumber() then
-        -- The trace found an obstruction, indicating the final position is not valid
-        return nil -- or handle accordingly
-    else
-        -- Path is clear, return the calculated end position
-        table.insert(endwarps, {Endpos, CheckBackstab(Endpos)})  -- Store position for this tick in the local variable
-        return Endpos
+    -- Function to create a direction vector from an angle
+    local function createDirectionVector2(angle)
+        local radianAngle = math.rad(angle)
+        return Vector3(math.cos(radianAngle), math.sin(radianAngle), 0) * 117
     end
+
+-- Function to validate a test point
+local function isValidTestPoint(point)
+    return point and point.x and point.y and point.z
 end
 
+-- Normalize angle to the range of -180 to 180
+local function normalizeAngle(angle)
+    return (angle + 180) % 360 - 180
+end
+
+local function Check3dCollision(rayOrigin, rayDirection, aabbMin, aabbMax)
+    -- Function to safely divide vectors component-wise
+    local function safeDivideVector(v1, v2)
+        local x = (v2.x ~= 0) and v1.x / v2.x or math.huge
+        local y = (v2.y ~= 0) and v1.y / v2.y or math.huge
+        local z = (v2.z ~= 0) and v1.z / v2.z or math.huge
+        return Vector3(x, y, z)
+    end
+
+    -- Calculate intersection times for each axis
+    local t1 = safeDivideVector(aabbMin - rayOrigin, rayDirection)
+    local t2 = safeDivideVector(aabbMax - rayOrigin, rayDirection)
+
+    local tMin = Vector3(math.min(t1.x, t2.x), math.min(t1.y, t2.y), math.min(t1.z, t2.z))
+    local tMax = Vector3(math.max(t1.x, t2.x), math.max(t1.y, t2.y), math.max(t1.z, t2.z))
+
+    -- Find the largest tMin and the smallest tMax
+    local largest_tMin = math.max(math.max(tMin.x, tMin.y), tMin.z)
+    local smallest_tMax = math.min(math.min(tMax.x, tMax.y), tMax.z)
+
+    -- Check if ray intersects AABB
+    return largest_tMin <= smallest_tMax
+end
+
+
+
+local function SimulateSideStab(initialAngle, centralAngle)
+    local angleAdjustmentStep = (initialAngle >= 0) and 1 or -1
+    local currentAngle = centralAngle + initialAngle
+    pLocalPos = pLocal:GetAbsOrigin()
+
+    -- Define the AABB min and max relative offsets
+    local aabbMin = Vector3(-24, -24, 0)
+    local aabbMax = Vector3(24, 24, 82)
+
+    for iteration = 1, 120 do
+        local directionVector = createDirectionVector2(currentAngle)
+        local newPosition = pLocalPos + directionVector
+
+        -- Perform a hull trace from the current position to the new position
+        local traceResult = engine.TraceHull(pLocalPos, newPosition, aabbMin, aabbMax, MASK_PLAYERSOLID)
+
+        if traceResult.fraction < 1 then
+            currentAngle = currentAngle + angleAdjustmentStep
+            print(currentAngle)
+        else
+            local dashResult = SimulateDash(createDirectionVector(currentAngle), 24)
+                return dashResult
+        end
+    end
+
+    return SimulateDash(createDirectionVector(centralAngle + ( initialAngle < 0 and -90 or 90 )), 25)
+end
 
 
 local function CalculateTrickstab()
@@ -694,12 +685,6 @@ local function CalculateTrickstab()
         return point and point.x and point.y and point.z
     end
 
-    -- Function to create a direction vector from an angle
-    local function createDirectionVector(angle)
-        local radianAngle = math.rad(angle)
-        return Vector3(math.cos(radianAngle), math.sin(radianAngle), 0) * MAX_SPEED
-    end
-
     -- Function to check and simulate backstab for a given angle
     local function simulateAndCheckBackstab(angle)
         local directionVector = createDirectionVector(angle)
@@ -728,7 +713,7 @@ local function CalculateTrickstab()
         likelyAngleOffset = -25   -- Adjust as needed
     end
 
-    local sideStabPos = SimulateSideStab(createDirectionVector(centralAngle + likelyAngleOffset), SIMULATION_TICKS, likelyAngleOffset)
+    local sideStabPos = SimulateSideStab(likelyAngleOffset, centralAngle)
     if sideStabPos and CheckBackstab(sideStabPos) then
         return sideStabPos
     end
@@ -743,6 +728,7 @@ local function CalculateTrickstab()
     -- Fail the function if all checks don't work
     return nil
 end
+
 
 
 
@@ -782,48 +768,48 @@ end
 local function WalkTo(cmd, Pos, destination, AdjustView)
     -- Check if Warp is possible and player's velocity is high enough
     if AdjustView and AdjustView == true and pLocal and pLocal:EstimateAbsVelocity():Length() > 319 then
-        local forwardMove = cmd:GetForwardMove()
-        local sideMove = cmd:GetSideMove()
+            local forwardMove = cmd:GetForwardMove()
+            local sideMove = cmd:GetSideMove()
 
-        -- Normalize move values for diagonal movement
-        if forwardMove ~= 0 and sideMove ~= 0 then
-            forwardMove = forwardMove / math.sqrt(2)  -- Normalize for diagonal
-            sideMove = sideMove / math.sqrt(2)        -- Normalize for diagonal
-        end
+            -- Normalize move values for diagonal movement
+            if forwardMove ~= 0 and sideMove ~= 0 then
+                forwardMove = forwardMove / math.sqrt(2)  -- Normalize for diagonal
+                sideMove = sideMove / math.sqrt(2)        -- Normalize for diagonal
+            end
 
-        -- Determine the movement direction
-        local moveDirectionAngle = 0
-        if forwardMove > 0 then
-            if sideMove > 0 then
-                moveDirectionAngle = 45  -- Moving forward-right
-            elseif sideMove < 0 then
-                moveDirectionAngle = -45 -- Moving forward-left
+            -- Determine the movement direction
+            local moveDirectionAngle = 0
+            if forwardMove > 0 then
+                if sideMove > 0 then
+                    moveDirectionAngle = 45  -- Moving forward-right
+                elseif sideMove < 0 then
+                    moveDirectionAngle = -45 -- Moving forward-left
+                else
+                    moveDirectionAngle = 0   -- Moving forward
+                end
+            elseif forwardMove < 0 then
+                if sideMove > 0 then
+                    moveDirectionAngle = 135  -- Moving backward-right
+                elseif sideMove < 0 then
+                    moveDirectionAngle = -135 -- Moving backward-left
+                else
+                    moveDirectionAngle = 180  -- Moving backward
+                end
             else
-                moveDirectionAngle = 0   -- Moving forward
+                if sideMove > 0 then
+                    moveDirectionAngle = 90  -- Moving right
+                elseif sideMove < 0 then
+                    moveDirectionAngle = -90 -- Moving left
+                end
             end
-        elseif forwardMove < 0 then
-            if sideMove > 0 then
-                moveDirectionAngle = 135  -- Moving backward-right
-            elseif sideMove < 0 then
-                moveDirectionAngle = -135 -- Moving backward-left
-            else
-                moveDirectionAngle = 180  -- Moving backward
-            end
-        else
-            if sideMove > 0 then
-                moveDirectionAngle = 90  -- Moving right
-            elseif sideMove < 0 then
-                moveDirectionAngle = -90 -- Moving left
-            end
-        end
-        
-        -- Calculate the base yaw angle towards the destination and adjust by movement direction
-        local baseYaw = PositionAngles(Pos, destination).yaw
-        local adjustedYaw = NormalizeAngle(baseYaw + moveDirectionAngle)
-        
-        -- Set view angles
-        local newViewAngles = EulerAngles(engine.GetViewAngles().pitch, adjustedYaw, 0)
-        engine.SetViewAngles(newViewAngles)
+            
+            -- Calculate the base yaw angle towards the destination and adjust by movement direction
+            local baseYaw = PositionAngles(Pos, destination).yaw
+            local adjustedYaw = NormalizeAngle(baseYaw + moveDirectionAngle)
+            
+            -- Set view angles
+            local newViewAngles = EulerAngles(engine.GetViewAngles().pitch, adjustedYaw, 0)
+            engine.SetViewAngles(newViewAngles)
     end
 
     -- Compute the move towards the destination
@@ -1000,7 +986,7 @@ local function doDraw()
                 local angle = angleStep * i
                 local circlePoint = center + Vector3(math.cos(angle), math.sin(angle), 0) * radius
         
-                local trace = engine.TraceLine(viewPos, circlePoint, MASK_SHOT_HULL)
+                local trace = engine.TraceLine(viewPos, circlePoint, MASK_SHOT_HULL) --engine.TraceHull(viewPos, circlePoint, vHitbox[1], vHitbox[2], MASK_SHOT_HULL)
                 local endPoint = trace.fraction < 1.0 and trace.endpos or circlePoint
         
                 vertices[i] = client.WorldToScreen(endPoint)
@@ -1120,6 +1106,10 @@ local function doDraw()
 
             ImMenu.BeginFrame(1)
             Menu.Advanced.Accuracy = ImMenu.Slider("Colision Accuracy", Menu.Advanced.Accuracy, 1, SIMULATION_TICKS)
+            ImMenu.EndFrame()
+
+            ImMenu.BeginFrame(1)
+            Menu.Advanced.sidestabTolerance = ImMenu.Slider("Angle Tolerance", Menu.Advanced.sidestabTolerance, 1, 20)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
