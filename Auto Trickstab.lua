@@ -43,6 +43,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
         sidestabTolerance = 1,
         AutoWarp = true,
         AutoRecharge = true,
+        ManualDirection = true,
     },
 
     Visuals = {
@@ -72,20 +73,20 @@ local BestYawDifference = 180
 local BestPosition
 local AlignPos = nil
 local tickRate = (1 / globals.TickInterval())
+local shouldalign = true
 
 local lastToggleTime = 0
 local Lbox_Menu_Open = true
+local toggleCooldown = 0.2  -- 200 milliseconds
+
 local function toggleMenu()
     local currentTime = globals.RealTime()
-    if currentTime - lastToggleTime >= 0.1 then
-        if Lbox_Menu_Open == false then
-            Lbox_Menu_Open = true
-        elseif Lbox_Menu_Open == true then
-            Lbox_Menu_Open = false
-        end
-        lastToggleTime = currentTime
+    if currentTime - lastToggleTime >= toggleCooldown then
+        Lbox_Menu_Open = not Lbox_Menu_Open  -- Toggle the state
+        lastToggleTime = currentTime  -- Reset the last toggle time
     end
 end
+
 
 local function CreateCFG(folder_name, table)
     local success, fullPath = filesystem.CreateDirectory(folder_name)
@@ -588,7 +589,7 @@ end
     -- Function to create a direction vector from an angle
     local function createDirectionVector2(angle)
         local radianAngle = math.rad(angle)
-        return Vector3(math.cos(radianAngle), math.sin(radianAngle), 0) * 117
+        return Vector3(math.cos(radianAngle), math.sin(radianAngle), 0)
     end
 
 -- Function to validate a test point
@@ -602,17 +603,17 @@ local function normalizeAngle(angle)
 end
 
 local function Check3dCollision(rayOrigin, rayDirection, aabbMin, aabbMax)
-    -- Function to safely divide vectors component-wise
-    local function safeDivideVector(v1, v2)
-        local x = (v2.x ~= 0) and v1.x / v2.x or math.huge
-        local y = (v2.y ~= 0) and v1.y / v2.y or math.huge
-        local z = (v2.z ~= 0) and v1.z / v2.z or math.huge
+    -- Function to divide vectors component-wise
+    local function divideVector(v1, v2)
+        local x = v1.x / v2.x
+        local y = v1.y / v2.y
+        local z = v1.z / v2.z
         return Vector3(x, y, z)
     end
 
     -- Calculate intersection times for each axis
-    local t1 = safeDivideVector(aabbMin - rayOrigin, rayDirection)
-    local t2 = safeDivideVector(aabbMax - rayOrigin, rayDirection)
+    local t1 = divideVector(aabbMin - rayOrigin, rayDirection)
+    local t2 = divideVector(aabbMax - rayOrigin, rayDirection)
 
     local tMin = Vector3(math.min(t1.x, t2.x), math.min(t1.y, t2.y), math.min(t1.z, t2.z))
     local tMax = Vector3(math.max(t1.x, t2.x), math.max(t1.y, t2.y), math.max(t1.z, t2.z))
@@ -625,6 +626,44 @@ local function Check3dCollision(rayOrigin, rayDirection, aabbMin, aabbMax)
     return largest_tMin <= smallest_tMax
 end
 
+Ray = {}
+Ray.__index = Ray
+
+function Ray:new(origin, direction)
+    local obj = setmetatable({}, Ray)
+    obj.origin = origin
+    obj.direction = direction
+    obj:update()
+    return obj
+end
+
+function Ray:update()
+    -- Calculate inverse of direction components
+    self.ii = (self.direction[1] == 0) and 0 or 1.0 / self.direction[1]
+    self.ij = (self.direction[2] == 0) and 0 or 1.0 / self.direction[2]
+    self.ik = (self.direction[3] == 0) and 0 or 1.0 / self.direction[3]
+end
+
+function Ray:intersects(aabb)
+    local t1 = (aabb[1][1] - self.origin[1]) * self.ii
+    local t2 = (aabb[2][1] - self.origin[1]) * self.ii
+    local t3 = (aabb[1][2] - self.origin[2]) * self.ij
+    local t4 = (aabb[2][2] - self.origin[2]) * self.ij
+    local t5 = (aabb[1][3] - self.origin[3]) * self.ik
+    local t6 = (aabb[2][3] - self.origin[3]) * self.ik
+
+    local tmin = math.max(math.min(t1, t2), math.min(t3, t4), math.min(t5, t6))
+    local tmax = math.min(math.max(t1, t2), math.max(t3, t4), math.max(t5, t6))
+    --print("tmin:", tmin, "tmax:", tmax)
+    return tmax >= 0 and tmin <= tmax
+end
+
+-- Example usage
+local ray = Ray:new({0, 0, -10}, {0, 100, 0})
+local box = {{-2, -2, -2}, {2, 2, 2}}
+
+local intersects = ray:intersects(box)
+--print("Intersects:", intersects)  -- Outputs: true or false
 
 
 local function SimulateSideStab(initialAngle, centralAngle)
@@ -636,19 +675,31 @@ local function SimulateSideStab(initialAngle, centralAngle)
     local aabbMin = Vector3(-24, -24, 0)
     local aabbMax = Vector3(24, 24, 82)
 
+    --ray = Ray:new({pLocalPosx, pLocalPos.y, pLocalPos.z}, {117, 0, 0})
+    --box = {{TargetPlayer.Pos.x + -48,TargetPlayer.Pos.y + -48,TargetPlayer.Pos.y - 82},{TargetPlayer.Pos.x + 48,TargetPlayer.Pos.y + 48,TargetPlayer.Pos.z + 82}}
+
+    --[[if box[1][3] < box[2][3] - 82 * 2 then
+        box[1][3] = box[2][3] - 82 * 2
+    end]]
+
     for iteration = 1, 120 do
         local directionVector = createDirectionVector2(currentAngle)
-        local newPosition = pLocalPos + directionVector
+        local newPosition = pLocalPos + directionVector * 117
 
         -- Perform a hull trace from the current position to the new position
         local traceResult = engine.TraceHull(pLocalPos, newPosition, aabbMin, aabbMax, MASK_PLAYERSOLID)
 
-        if traceResult.fraction < 1 then
+        --ray = Ray:new({pLocalPos.x, pLocalPos.y, pLocalPos.z},{directionVector.x, directionVector.y, directionVector.z})
+
+        --intersects = ray:intersects(box)
+        --print(intersects)
+        if traceResult.entity == TargetPlayer.entity then
             currentAngle = currentAngle + angleAdjustmentStep
-            print(currentAngle)
-        else
+        elseif not traceResult.entity:IsValid() then
             local dashResult = SimulateDash(createDirectionVector(currentAngle), 24)
-                return dashResult
+            return dashResult
+        else
+            return nil
         end
     end
 
@@ -711,6 +762,15 @@ local function CalculateTrickstab()
         likelyAngleOffset = 25  -- Adjust as needed
     else
         likelyAngleOffset = -25   -- Adjust as needed
+    end
+
+    -- Check if the opposite direction key is being pressed and invert the angle if it is
+    if Menu.Main.AutoAlign and Menu.Advanced.ManualDirection then
+        if initialYawDiff < 0 and input.IsButtonDown(KEY_D) then
+            likelyAngleOffset = -likelyAngleOffset
+        elseif initialYawDiff > 0 and input.IsButtonDown(KEY_A) then
+            likelyAngleOffset = -likelyAngleOffset
+        end
     end
 
     local sideStabPos = SimulateSideStab(likelyAngleOffset, centralAngle)
@@ -841,7 +901,7 @@ local function AutoWarp_AutoBlink(cmd)
             else
                 gui.SetValue("fake lag", 0)
             end
-        elseif Menu.Main.AutoAlign and positions[24] then
+        elseif Menu.Main.AutoAlign and positions[24] and shouldalign then
             WalkTo(cmd, pLocalPos, positions[24], false)
         end
 end
@@ -1011,7 +1071,6 @@ local function doDraw()
             for angle, point in pairs(endwarps) do
                 if point[2] == false then
                     draw.Color(255, 0, 0, 255)
-                    
                     local screenPos = client.WorldToScreen(Vector3(point[1].x, point[1].y, point[1].z))
                     if screenPos then
                         draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 3)
@@ -1022,6 +1081,63 @@ local function doDraw()
                     if screenPos then
                         draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
                     end
+                end
+            end
+            if ray then
+                -- Calculate min and max points
+                local minPoint = Vector3(box[1][1], box[1][2], box[1][3])
+                local maxPoint = Vector3(box[2][1], box[2][2], box[2][3])
+
+                -- Calculate vertices of the AABB
+                -- Assuming minPoint and maxPoint are the minimum and maximum points of the AABB:
+                local vertices = {
+                    Vector3(minPoint.x, minPoint.y, minPoint.z),  -- Bottom-back-left
+                    Vector3(minPoint.x, maxPoint.y, minPoint.z),  -- Bottom-front-left
+                    Vector3(maxPoint.x, maxPoint.y, minPoint.z),  -- Bottom-front-right
+                    Vector3(maxPoint.x, minPoint.y, minPoint.z),  -- Bottom-back-right
+                    Vector3(minPoint.x, minPoint.y, maxPoint.z),  -- Top-back-left
+                    Vector3(minPoint.x, maxPoint.y, maxPoint.z),  -- Top-front-left
+                    Vector3(maxPoint.x, maxPoint.y, maxPoint.z),  -- Top-front-right
+                    Vector3(maxPoint.x, minPoint.y, maxPoint.z)   -- Top-back-right
+                }
+
+
+
+                --[[local vertices = {
+                    client.WorldToScreen(vPlayerFuture + Vector3(hitbox_Width, hitbox_Width, 0)),
+                    client.WorldToScreen(vPlayerFuture + Vector3(-hitbox_Width, hitbox_Width, 0)),
+                    client.WorldToScreen(vPlayerFuture + Vector3(-hitbox_Width, -hitbox_Width, 0)),
+                    client.WorldToScreen(vPlayerFuture + Vector3(hitbox_Width, -hitbox_Width, 0)),
+                    client.WorldToScreen(vPlayerFuture + Vector3(hitbox_Width, hitbox_Width, hitbox_Height)),
+                    client.WorldToScreen(vPlayerFuture + Vector3(-hitbox_Width, hitbox_Width, hitbox_Height)),
+                    client.WorldToScreen(vPlayerFuture + Vector3(-hitbox_Width, -hitbox_Width, hitbox_Height)),
+                    client.WorldToScreen(vPlayerFuture + Vector3(hitbox_Width, -hitbox_Width, hitbox_Height))
+                }]]
+
+                -- Convert 3D coordinates to 2D screen coordinates
+                for i, vertex in ipairs(vertices) do
+                    vertices[i] = client.WorldToScreen(vertex)
+                end
+
+                -- Draw lines between vertices to visualize the box
+                if vertices[1] and vertices[2] and vertices[3] and vertices[4] and vertices[5] and vertices[6] and vertices[7] and vertices[8] then
+                    -- Draw front face
+                    draw.Line(vertices[1][1], vertices[1][2], vertices[2][1], vertices[2][2])
+                    draw.Line(vertices[2][1], vertices[2][2], vertices[3][1], vertices[3][2])
+                    draw.Line(vertices[3][1], vertices[3][2], vertices[4][1], vertices[4][2])
+                    draw.Line(vertices[4][1], vertices[4][2], vertices[1][1], vertices[1][2])
+
+                    -- Draw back face
+                    draw.Line(vertices[5][1], vertices[5][2], vertices[6][1], vertices[6][2])
+                    draw.Line(vertices[6][1], vertices[6][2], vertices[7][1], vertices[7][2])
+                    draw.Line(vertices[7][1], vertices[7][2], vertices[8][1], vertices[8][2])
+                    draw.Line(vertices[8][1], vertices[8][2], vertices[5][1], vertices[5][2])
+
+                    -- Draw connecting lines
+                    draw.Line(vertices[1][1], vertices[1][2], vertices[5][1], vertices[5][2])
+                    draw.Line(vertices[2][1], vertices[2][2], vertices[6][1], vertices[6][2])
+                    draw.Line(vertices[3][1], vertices[3][2], vertices[7][1], vertices[7][2])
+                    draw.Line(vertices[4][1], vertices[4][2], vertices[8][1], vertices[8][2])
                 end
             end
         end
@@ -1049,15 +1165,41 @@ local function doDraw()
                     draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
                 end
             end
+
+        if ray then
+                -- Length of the ray for visualization
+                local rayLength = 117
+
+                -- Calculate the end point of the ray based on its direction and length
+                local endPoint = {
+                    ray.origin[1] + ray.direction[1] * rayLength,
+                    ray.origin[2] + ray.direction[2] * rayLength,
+                    ray.origin[3] + ray.direction[3] * rayLength
+                }
+
+                -- Convert the 3D coordinates of the origin and end point to 2D screen coordinates
+                local screenStart = client.WorldToScreen(Vector3(ray.origin[1], ray.origin[2], ray.origin[3]))
+                local screenEnd = client.WorldToScreen(Vector3(endPoint[1], endPoint[2], endPoint[3]))
+
+                -- Check if both points are on the screen
+                if screenStart and screenEnd then
+                    -- Set the color for the ray line (red)
+                    draw.Color(255, 255, 255, 255)
+
+                    -- Draw the line on the screen
+                    draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
+                end
+            end
         end
     end
 
 
 
 -----------------------------------------------------------------------------------------------------
-                --Menu
+    --Menu
 
-    if input.IsButtonPressed( 72 )then
+    -- Inside your OnCreateMove or similar function where you check for input
+    if input.IsButtonDown(72) then  -- Replace 72 with the actual key code for the button you want to use
         toggleMenu()
     end
 
@@ -1109,7 +1251,7 @@ local function doDraw()
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
-            Menu.Advanced.sidestabTolerance = ImMenu.Slider("Angle Tolerance", Menu.Advanced.sidestabTolerance, 1, 20)
+            Menu.Advanced.ManualDirection = ImMenu.Checkbox("Manual Direction", Menu.Advanced.ManualDirection)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
