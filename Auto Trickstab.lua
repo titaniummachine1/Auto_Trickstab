@@ -20,7 +20,7 @@ local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 2.7, -- dont touch this, this is just for managing the config version
+    Version = 2.8, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -39,11 +39,11 @@ local Menu = { -- this is the config that will be loaded every time u load the s
     Advanced = {
         ColisionCheck = true,
         AdvancedPred = true,
-        Accuracy = 24,
+        Accuracy = 23,
         sidestabTolerance = 1,
         AutoWarp = true,
         AutoRecharge = true,
-        ManualDirection = true,
+        ManualDirection = false,
     },
 
     Visuals = {
@@ -74,6 +74,7 @@ local BestPosition
 local AlignPos = nil
 local tickRate = (1 / globals.TickInterval())
 local shouldalign = true
+local world = entities.FindByClass("CWorld")[0]
 
 local lastToggleTime = 0
 local Lbox_Menu_Open = true
@@ -224,7 +225,6 @@ end
     return nil
 end]]
 
-
 -- Function to update the cache for the local player and loadout slot
 local function UpdateLocalPlayerCache()
     pLocal = entities.GetLocalPlayer()
@@ -241,8 +241,76 @@ local function UpdateLocalPlayerCache()
     --AlignPos = nil
     return pLocal
 end
+-- Initialize cache
+UpdateLocalPlayerCache()
 
-local PastTicks = {{}}
+local function CalculateBackwardVector(player)
+    local forwardAngle = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]")
+    local pitch = math.rad(forwardAngle.x)
+    local yaw = math.rad(forwardAngle.y)
+    local forwardVector = Vector3(math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), 0)
+    return -forwardVector
+end
+
+local function CalculateBackPoint(player1)
+    local hitboxes = player1:GetHitboxes()
+    if hitboxes then
+        local hitboxCenter = (hitboxes[4][1] + hitboxes[4][2]) * 0.5
+        return hitboxCenter - CalculateForwardVector(player1) * 30
+    else
+        return nil
+    end
+end
+
+local PastTicks = {{}} -- Table to hold past positions for backtracking
+local function UpdateTarget()
+    local allPlayers = entities.FindByClass("CTFPlayer")
+    local bestTargetDetails = nil
+    local maxAttackDistance = 225  -- Attack range plus warp distance
+    local maxBacktrackDistance = 670 -- Max backtrack distance
+    local bestDistance = maxAttackDistance + 1  -- Initialize to a large number
+
+    for _, player in ipairs(allPlayers) do
+        if player:IsAlive() and not player:IsDormant() and player:GetTeamNumber() ~= pLocal:GetTeamNumber() and player ~= pLocal then
+            local playerIndex = player:GetIndex()
+            local playerPos = player:GetAbsOrigin()
+            local distance = (pLocalPos - playerPos):Length()
+
+            -- Check if the player is within the attack range
+            if distance < bestDistance then
+                bestDistance = distance
+                bestTargetDetails = {
+                    idx = playerIndex,
+                    entity = player,
+                    Pos = playerPos,
+                    FPos = playerPos + player:EstimateAbsVelocity() * 0.015,
+                    viewOffset = player:GetPropVector("localdata", "m_vecViewOffset[0]"),
+                    hitboxPos = (player:GetHitboxes()[4][1] + player:GetHitboxes()[4][2]) * 0.5,
+                    hitboxForward = CalculateBackwardVector(player),
+                    backPoint = CalculateBackPoint(player)
+                }
+            end
+
+            -- Maintain history of past positions for backtracking if within the max backtrack distance
+            if distance <= maxBacktrackDistance and bestTargetDetails then
+                PastTicks[playerIndex] = PastTicks[playerIndex] or {pos = {}, backPos = {}}
+                local backPoint = CalculateBackPoint(player)
+
+                table.insert(PastTicks[playerIndex].pos, playerPos)
+                table.insert(PastTicks[playerIndex].backPos, backPoint)
+
+                if #PastTicks[playerIndex].pos > 66 then
+                    table.remove(PastTicks[playerIndex].pos, 1)
+                    table.remove(PastTicks[playerIndex].backPos, 1)
+                end
+            end
+        end
+    end
+
+    return bestTargetDetails
+end
+
+--[[local PastTicks = {{}}
 local function UpdateTarget()
     local allPlayers = entities.FindByClass("CTFPlayer")
     local bestTargetDetails = nil
@@ -301,10 +369,8 @@ local function UpdateTarget()
     else
         return nil
     end
-end
+end]]
 
--- Initialize cache
-UpdateLocalPlayerCache()
 
 -- Normalize a yaw angle to the range [-180, 180]
 local function NormalizeYaw(yaw)
@@ -431,7 +497,7 @@ end
 
 -- Constants
 local MAX_SPEED = 320  -- Maximum speed
-local SIMULATION_TICKS = 24  -- Number of ticks for simulation
+local SIMULATION_TICKS = 23  -- Number of ticks for simulation
 local positions = {}
 
 local FORWARD_COLLISION_ANGLE = 55
@@ -589,87 +655,13 @@ end
     -- Function to create a direction vector from an angle
     local function createDirectionVector2(angle)
         local radianAngle = math.rad(angle)
-        return Vector3(math.cos(radianAngle), math.sin(radianAngle), 0)
+        return Vector3(math.cos(radianAngle), math.sin(radianAngle), 0) * 117
     end
-
--- Function to validate a test point
-local function isValidTestPoint(point)
-    return point and point.x and point.y and point.z
-end
-
--- Normalize angle to the range of -180 to 180
-local function normalizeAngle(angle)
-    return (angle + 180) % 360 - 180
-end
-
-local function Check3dCollision(rayOrigin, rayDirection, aabbMin, aabbMax)
-    -- Function to divide vectors component-wise
-    local function divideVector(v1, v2)
-        local x = v1.x / v2.x
-        local y = v1.y / v2.y
-        local z = v1.z / v2.z
-        return Vector3(x, y, z)
-    end
-
-    -- Calculate intersection times for each axis
-    local t1 = divideVector(aabbMin - rayOrigin, rayDirection)
-    local t2 = divideVector(aabbMax - rayOrigin, rayDirection)
-
-    local tMin = Vector3(math.min(t1.x, t2.x), math.min(t1.y, t2.y), math.min(t1.z, t2.z))
-    local tMax = Vector3(math.max(t1.x, t2.x), math.max(t1.y, t2.y), math.max(t1.z, t2.z))
-
-    -- Find the largest tMin and the smallest tMax
-    local largest_tMin = math.max(math.max(tMin.x, tMin.y), tMin.z)
-    local smallest_tMax = math.min(math.min(tMax.x, tMax.y), tMax.z)
-
-    -- Check if ray intersects AABB
-    return largest_tMin <= smallest_tMax
-end
-
-Ray = {}
-Ray.__index = Ray
-
-function Ray:new(origin, direction)
-    local obj = setmetatable({}, Ray)
-    obj.origin = origin
-    obj.direction = direction
-    obj:update()
-    return obj
-end
-
-function Ray:update()
-    -- Calculate inverse of direction components
-    self.ii = (self.direction[1] == 0) and 0 or 1.0 / self.direction[1]
-    self.ij = (self.direction[2] == 0) and 0 or 1.0 / self.direction[2]
-    self.ik = (self.direction[3] == 0) and 0 or 1.0 / self.direction[3]
-end
-
-function Ray:intersects(aabb)
-    local t1 = (aabb[1][1] - self.origin[1]) * self.ii
-    local t2 = (aabb[2][1] - self.origin[1]) * self.ii
-    local t3 = (aabb[1][2] - self.origin[2]) * self.ij
-    local t4 = (aabb[2][2] - self.origin[2]) * self.ij
-    local t5 = (aabb[1][3] - self.origin[3]) * self.ik
-    local t6 = (aabb[2][3] - self.origin[3]) * self.ik
-
-    local tmin = math.max(math.min(t1, t2), math.min(t3, t4), math.min(t5, t6))
-    local tmax = math.min(math.max(t1, t2), math.max(t3, t4), math.max(t5, t6))
-    --print("tmin:", tmin, "tmax:", tmax)
-    return tmax >= 0 and tmin <= tmax
-end
-
--- Example usage
-local ray = Ray:new({0, 0, -10}, {0, 100, 0})
-local box = {{-2, -2, -2}, {2, 2, 2}}
-
-local intersects = ray:intersects(box)
---print("Intersects:", intersects)  -- Outputs: true or false
 
 
 local function SimulateSideStab(initialAngle, centralAngle)
     local angleAdjustmentStep = (initialAngle >= 0) and 1 or -1
     local currentAngle = centralAngle + initialAngle
-    pLocalPos = pLocal:GetAbsOrigin()
 
     -- Define the AABB min and max relative offsets
     local aabbMin = Vector3(-24, -24, 0)
@@ -682,30 +674,28 @@ local function SimulateSideStab(initialAngle, centralAngle)
         box[1][3] = box[2][3] - 82 * 2
     end]]
 
-    for iteration = 1, 120 do
+    for iteration = 1, 90 do
         local directionVector = createDirectionVector2(currentAngle)
-        local newPosition = pLocalPos + directionVector * 117
+        local newPosition = pLocalPos + directionVector
 
         -- Perform a hull trace from the current position to the new position
-        local traceResult = engine.TraceHull(pLocalPos, newPosition, aabbMin, aabbMax, MASK_PLAYERSOLID)
+        local traceResult = engine.TraceHull(pLocalPos, newPosition, aabbMin, aabbMax, MASK_SOLID_BRUSHONLY )
 
-        --ray = Ray:new({pLocalPos.x, pLocalPos.y, pLocalPos.z},{directionVector.x, directionVector.y, directionVector.z})
-
-        --intersects = ray:intersects(box)
-        --print(intersects)
-        if traceResult.entity == TargetPlayer.entity then
-            currentAngle = currentAngle + angleAdjustmentStep
-        elseif not traceResult.entity:IsValid() then
-            local dashResult = SimulateDash(createDirectionVector(currentAngle), 24)
-            return dashResult
+        if traceResult.fraction < 1 then --traceResult.entity == TargetPlayer.entity then
+            if traceResult.entity == world or traceResult.entity:GetClass() == "CWorld" then
+                return nil
+            else
+                currentAngle = currentAngle + angleAdjustmentStep
+            end
         else
-            return nil
+            local dashResult = SimulateDash(createDirectionVector(currentAngle), SIMULATION_TICKS)
+            return CheckBackstab(dashResult) and dashResult or nil
         end
     end
 
-    return SimulateDash(createDirectionVector(centralAngle + ( initialAngle < 0 and -90 or 90 )), 24)
+    local lastTest = SimulateDash(createDirectionVector(centralAngle + ( initialAngle < 0 and -90 or 90 )), SIMULATION_TICKS)
+    return CheckBackstab(lastTest) and lastTest or nil
 end
-
 
 local function CalculateTrickstab()
     -- Ensure pLocal and TargetPlayer are valid and have position data
@@ -716,6 +706,11 @@ local function CalculateTrickstab()
 
     if not TargetPlayer or not TargetPlayer.FPos then
         print("Target player or target player position is undefined")
+        return nil
+    end
+
+    if not world:IsValid() then
+        world = entities.FindByClass("CWorld")[0]
         return nil
     end
 
@@ -731,16 +726,11 @@ local function CalculateTrickstab()
     local Disguised = pLocal:InCond(TFCond_Disguised)
     MAX_SPEED = Disguised and pLocal:EstimateAbsVelocity():Length() or 320
 
-    -- Function to validate a test point
-    local function isValidTestPoint(point)
-        return point and point.x and point.y and point.z
-    end
-
     -- Function to check and simulate backstab for a given angle
     local function simulateAndCheckBackstab(angle)
         local directionVector = createDirectionVector(angle)
         local testPoint = SimulateDash(directionVector, SIMULATION_TICKS)
-        return isValidTestPoint(testPoint) and CheckBackstab(testPoint)
+        return CheckBackstab(testPoint)
     end
 
     -- Determine initial yaw difference for further simulations
@@ -748,7 +738,7 @@ local function CalculateTrickstab()
     local spyYaw = PositionYaw(playerPos, targetPos)
     local initialYawDiff = NormalizeYaw(spyYaw - enemyYaw)
 
-    if initialYawDiff > 90 then
+    if initialYawDiff > 80 then
         -- Check the back angle next
         local backAngle = PositionYaw(pLocalPos, TargetPlayer.backPoint)
         if simulateAndCheckBackstab(backAngle) then
@@ -774,11 +764,11 @@ local function CalculateTrickstab()
     end
 
     local sideStabPos = SimulateSideStab(likelyAngleOffset, centralAngle)
-    if sideStabPos and CheckBackstab(sideStabPos) then
+    if sideStabPos then
         return sideStabPos
     end
 
-    if initialYawDiff > 90 then
+    if initialYawDiff > 80 then
         -- Try the forward angle if both side and back angles fail
         if simulateAndCheckBackstab(centralAngle) then
             return SimulateDash(createDirectionVector(centralAngle), SIMULATION_TICKS)
@@ -827,7 +817,7 @@ end
 ---@param destination Vector3
 local function WalkTo(cmd, Pos, destination, AdjustView)
     -- Check if Warp is possible and player's velocity is high enough
-    if AdjustView and AdjustView == true and pLocal and pLocal:EstimateAbsVelocity():Length() > 319 then
+    if AdjustView and AdjustView == true and pLocal and pLocal:EstimateAbsVelocity():Length() > 318 and warp.CanWarp() and not warp.IsWarping() then
             local forwardMove = cmd:GetForwardMove()
             local sideMove = cmd:GetSideMove()
 
@@ -886,23 +876,22 @@ local function AutoWarp_AutoBlink(cmd)
 
     -- Main logic
     local lastDistance
-    if BackstabPos then
+        if BackstabPos ~= nil then
             if Menu.Main.AutoWalk then
                 -- Walk to the backstab position if AutoWalk is enabled
                 WalkTo(cmd, pLocalPos, BackstabPos, true)
             end
 
-            if Menu.Advanced.AutoWarp and warp.CanWarp() and warp.GetChargedTicks() > 22 then
+            if Menu.Advanced.AutoWarp and not warp.IsWarping() and warp.CanWarp() and warp.GetChargedTicks() > 22 and pLocal:EstimateAbsVelocity():Length() > 319 then
                 -- Trigger warp after changing direction and disable fakelag so warp works right
                 gui.SetValue("fake lag", 0)
                 warp.TriggerWarp()
-            elseif Menu.Advanced.AutoWarp and not warp.CanWarp() then
+            elseif Menu.Advanced.AutoWarp and not warp.CanWarp() and not warp.IsWarping() then
                 gui.SetValue("fake lag", 1)
-            else
-                gui.SetValue("fake lag", 0)
             end
-        elseif Menu.Main.AutoAlign and positions[24] and shouldalign then
-            WalkTo(cmd, pLocalPos, positions[24], false)
+        elseif Menu.Main.AutoAlign and positions[SIMULATION_TICKS] then
+            gui.SetValue("fake lag", 1)
+            WalkTo(cmd, pLocalPos, positions[SIMULATION_TICKS], false)
         end
 end
 
@@ -927,19 +916,14 @@ local function OnCreateMove(cmd)
     if UpdateLocalPlayerCache() == false or not pLocal then return end  -- Update local player data every tick
     endwarps = {}
     positions = {}
+    TargetPlayer = {{}}
 
     -- Get the local player's active weapon
     local pWeapon = pLocal:GetPropEntity("m_hActiveWeapon")
     if not pWeapon or not pWeapon:IsMeleeWeapon() then return end -- Return if the local player doesn't have an active weaponend
 
-    --UpdateBacktrackData() --update position and angle data for backtrack --todo
-
-    TargetPlayer = nil
-    local target = UpdateTarget()
-    if not TargetPlayer then
-        gui.SetValue("fake lag", 0)
-        --TargetPlayer = {}
-    else
+    TargetPlayer = UpdateTarget()
+    if TargetPlayer ~= nil then
         UpdateSimulationCache()
         if Menu.Main.TrickstabModeSelected == 1 then
             AutoWarp_AutoBlink(cmd)
@@ -954,6 +938,9 @@ local function OnCreateMove(cmd)
         elseif Menu.Main.TrickstabModeSelected == 6 then
 
         end
+    else
+        gui.SetValue("fake lag", 0)
+        --TargetPlayer = {}
     end
 
         -- Calculate latency in seconds
