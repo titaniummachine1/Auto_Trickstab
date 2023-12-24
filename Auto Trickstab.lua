@@ -20,7 +20,7 @@ local Fonts = lnxLib.UI.FontslnxLib
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-    Version = 2.8, -- dont touch this, this is just for managing the config version
+    Version = 2.9, -- dont touch this, this is just for managing the config version
 
     tabs = { -- dont touch this, this is just for managing the tabs in the menu
         Main = true,
@@ -51,7 +51,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
         VisualizePoints = true,
         VisualizeStabPoint = true,
         VisualizeUsellesSimulations = true,
-        Attack_Circle = true,
+        Attack_Circle = false,
         ForwardLine = false,
     },
 }
@@ -236,7 +236,7 @@ local function UpdateLocalPlayerCache()
     then return false end
 
     --cachedLoadoutSlot2 = pLocal and pLocal:GetEntityForLoadoutSlot(2) or nil
-    pLocalViewPos = pLocal and (pLocal:GetAbsOrigin() + pLocal:GetPropVector("localdata", "m_vecViewOffset[0]")) or nil
+    pLocalViewPos = pLocal and (pLocal:GetAbsOrigin() + pLocal:GetPropVector("localdata", "m_vecViewOffset[0]")) or pLocalPos or Vector3(0,0,0)
     pLocalPos = pLocal:GetAbsOrigin()
     --AlignPos = nil
     return pLocal
