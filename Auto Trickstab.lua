@@ -1222,7 +1222,7 @@ local function doDraw()
             ImMenu.EndFrame()
     
             ImMenu.BeginFrame(1)
-            ImMenu.Text("Please Use Lbox Auto Bacsktab")
+            ImMenu.Text("Please Use Lbox Auto Backstab")
             ImMenu.EndFrame()
     
             ImMenu.BeginFrame(1)
