@@ -256,7 +256,7 @@ local function CalculateBackPoint(player1)
     local hitboxes = player1:GetHitboxes()
     if hitboxes then
         local hitboxCenter = (hitboxes[4][1] + hitboxes[4][2]) * 0.5
-        return hitboxCenter - CalculateForwardVector(player1) * 30
+        return hitboxCenter - CalculateBackwardVector(player1) * 30
     else
         return nil
     end
@@ -291,7 +291,7 @@ local function UpdateTarget()
                 }
             end
 
-            -- Maintain history of past positions for backtracking if within the max backtrack distance
+            --[[ Maintain history of past positions for backtracking if within the max backtrack distance
             if distance <= maxBacktrackDistance and bestTargetDetails then
                 PastTicks[playerIndex] = PastTicks[playerIndex] or {pos = {}, backPos = {}}
                 local backPoint = CalculateBackPoint(player)
@@ -303,7 +303,7 @@ local function UpdateTarget()
                     table.remove(PastTicks[playerIndex].pos, 1)
                     table.remove(PastTicks[playerIndex].backPos, 1)
                 end
-            end
+            end]]
         end
     end
 
