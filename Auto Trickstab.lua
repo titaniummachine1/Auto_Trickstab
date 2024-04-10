@@ -241,6 +241,7 @@ local function UpdateLocalPlayerCache()
     --AlignPos = nil
     return pLocal
 end
+
 -- Initialize cache
 UpdateLocalPlayerCache()
 
