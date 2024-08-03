@@ -8,6 +8,10 @@
 
 https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/bf32fbb5-cb37-4c75-9c89-90be1c46bb68
 
+
+https://github.com/user-attachments/assets/8bae83ed-c6d7-4711-b106-06a26fca72ec
+
+
 # featheres
 auto config system(loads and saves config automaticaly)
 
