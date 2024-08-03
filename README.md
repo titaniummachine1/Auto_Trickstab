@@ -3,6 +3,10 @@
 
 ## This script REQUIRES [lnxLib](https://github.com/lnx00/Lmaobox-Library/releases/latest/) and [ImMenu](https://github.com/lnx00/Lmaobox-ImMenu/blob/main/src/ImMenu.lua). It will NOT work without these two luas.
 
+## Download
+[![Download Latest](https://img.shields.io/github/downloads/titaniummachine1/Auto_Trickstab/total.svg?style=for-the-badge&logo=download&label=Download%20Latest)](https://github.com/titaniummachine1/Auto_Trickstab/releases/latest/download/Auto.Trickstab.lua)
+
+
 # Auto_Trickstab
 ![image](https://github.com/user-attachments/assets/755e4f02-aaf6-4ce2-9259-b3c0474ea514)
 
@@ -14,23 +18,10 @@ https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/bf32fbb5-cb37
 # featheres
 auto config system(loads and saves config automaticaly)
 
-auto Warp Behind enemy
+auto Warp Behind enemy or to side
 
 ## Description
 automaticly detects posibility of backstabing enemy upon warping behind him
 
-unfortunatly lbox didnt fix warp.triggerwarp() so automatic instakill isnt an option now.
-
-## Menu Fix
-if your lua doesnt work after update consider removing old config data.
-
-first unload lua to save config.
-
-Go to your game properties / local files and then in team fortres 2 folder there is " LBOX Auto Trickstab lua " folder
-
-remove it and load lua again
-
 [In case of problems Contact me on Telegram](https://t.me/TerminatorMachine)
 
-## Download
-[![Download Latest](https://img.shields.io/github/downloads/titaniummachine1/Auto_Trickstab/total.svg?style=for-the-badge&logo=download&label=Download%20Latest)](https://github.com/titaniummachine1/Auto_Trickstab/releases/latest/download/Auto.Trickstab.lua)
