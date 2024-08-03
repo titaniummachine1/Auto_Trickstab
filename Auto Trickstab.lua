@@ -530,11 +530,12 @@ local function determine_direction(my_pos, enemy_pos, hitbox_size, vertical_rang
     local dx = enemy_pos.x - my_pos.x
     local dy = enemy_pos.y - my_pos.y
     local dz = enemy_pos.z - my_pos.z
+    local buffor = 1 --fixing the bug wehre hugging the target makes algoritm think were inside him XD
 
     local out_of_vertical_range = (math.abs(dz) > vertical_range) and 1 or 0
 
-    local direction_x = ((dx > hitbox_size) and 1 or 0) - ((dx < -hitbox_size) and 1 or 0)
-    local direction_y = ((dy > hitbox_size) and 1 or 0) - ((dy < -hitbox_size) and 1 or 0)
+    local direction_x = ((dx > hitbox_size - buffor) and 1 or 0) - ((dx < -hitbox_size + buffor) and 1 or 0)
+    local direction_y = ((dy > hitbox_size - buffor) and 1 or 0) - ((dy < -hitbox_size + buffor) and 1 or 0)
 
     return {(direction_x * (1 - out_of_vertical_range)), (direction_y * (1 - out_of_vertical_range))}
 end
@@ -565,29 +566,33 @@ local function CalculateTrickstab()
     -- Get the best positions (corners or origin) based on the direction to the enemy
     local best_positions = get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range)
 
-    -- Calculate the yaw difference between the player and the enemy
-    --local enemy_yaw = PositionYaw(enemy_pos, TargetPlayer.hitboxForward)
+    -- Check if we are within backstab yaw range
     local my_yaw = PositionYaw(my_pos, enemy_pos)
+    local enemyYaw = NormalizeYaw(PositionYaw(enemy_pos + Vector3(0, 0, 75), enemy_pos + TargetPlayer.hitboxForward))
+    local spyYaw = NormalizeYaw(PositionYaw(enemy_pos, my_pos + Vector3(0, 0, 75)))
 
-    -- Sort positions based on yaw difference
-    table.sort(best_positions, function(a, b)
-        local a_yaw = PositionYaw(enemy_pos, enemy_pos + a)
-        local b_yaw = PositionYaw(enemy_pos, enemy_pos + b)
-        local a_diff = math.abs(NormalizeYaw(my_yaw - a_yaw))
-        local b_diff = math.abs(NormalizeYaw(my_yaw - b_yaw))
-        return a_diff < b_diff
-    end)
-
-    -- Check each best position for a valid backstab using simulation
-    for _, pos in ipairs(best_positions) do
-        pos = enemy_pos + pos
-        local simulated_position = SimulateDash(pos - my_pos, warp.GetChargedTicks() - 1 or 23)
-        local lastpos = simulated_position
-
-        if CheckBackstab(lastpos) then
-            return lastpos
+    if CheckYawDelta(spyYaw, enemyYaw) then
+        -- We are within backstab yaw range, check the first index
+        local center_pos = enemy_pos + best_positions[1]
+        local simulated_position = SimulateDash(center_pos - my_pos, warp.GetChargedTicks() or 24)
+        if CheckBackstab(simulated_position) then
+            return simulated_position
         end
-        --break --breakpoint
+    else
+        -- Determine the best direction (left or right)
+        local left_pos = enemy_pos + best_positions[2]
+        local right_pos = enemy_pos + best_positions[3]
+        local left_yaw = PositionYaw(my_pos, left_pos)
+        local right_yaw = PositionYaw(my_pos, right_pos)
+        local left_diff = math.abs(NormalizeYaw(my_yaw - left_yaw))
+        local right_diff = math.abs(NormalizeYaw(my_yaw - right_yaw))
+
+        -- Choose the best direction
+        local best_pos = left_diff < right_diff and left_pos or right_pos
+        local simulated_position = SimulateDash(best_pos - my_pos, warp.GetChargedTicks() or 24)
+        if CheckBackstab(simulated_position) then
+            return simulated_position
+        end
     end
 
     -- If no valid backstab position is found, return emptyVec
