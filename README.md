@@ -4,20 +4,17 @@
 ## This script REQUIRES [lnxLib](https://github.com/lnx00/Lmaobox-Library/releases/latest/) and [ImMenu](https://github.com/lnx00/Lmaobox-ImMenu/blob/main/src/ImMenu.lua). It will NOT work without these two luas.
 
 # Auto_Trickstab
-![image](https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/fd30e64e-5aef-47ef-a1fa-7ab2de0dace5)
-
-https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/bf32fbb5-cb37-4c75-9c89-90be1c46bb68
-
+![image](https://github.com/user-attachments/assets/755e4f02-aaf6-4ce2-9259-b3c0474ea514)
 
 https://github.com/user-attachments/assets/8bae83ed-c6d7-4711-b106-06a26fca72ec
 
 
+https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/bf32fbb5-cb37-4c75-9c89-90be1c46bb68
+
 # featheres
 auto config system(loads and saves config automaticaly)
 
-auto backstab
-
-auto walk to backstab oportunity
+auto Warp Behind enemy
 
 ## Description
 automaticly detects posibility of backstabing enemy upon warping behind him
