@@ -10,7 +10,7 @@
 # Auto_Trickstab
 ![image](https://github.com/user-attachments/assets/755e4f02-aaf6-4ce2-9259-b3c0474ea514)
 
-[https://github.com/user-attachments/assets/8bae83ed-c6d7-4711-b106-06a26fca72ec](https://github.com/titaniummachine1/Auto_Trickstab)
+https://github.com/user-attachments/assets/8bae83ed-c6d7-4711-b106-06a26fca72ec
 
 
 https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/bf32fbb5-cb37-4c75-9c89-90be1c46bb68
