@@ -46,7 +46,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
     },
 
     Advanced = {
-        WarpTolerance = 180,
+        WarpTolerance = 77,
         AutoRecharge = true,
         ManualDirection = false,
     },
@@ -559,10 +559,11 @@ local function get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertic
     return bestcorners
 end
 
-local function CalculateTrickstab()
+
+local function CalculateTrickstab(cmd)
     -- Ensure pLocal and TargetPlayer are valid and have position data
-    if not pLocal or not pLocal:GetAbsOrigin() then
-        print("Local player position is undefined")
+    if not TargetPlayer or not TargetPlayer.Pos then
+        --print("player position is undefined")
         return emptyVec
     end
 
@@ -574,6 +575,10 @@ local function CalculateTrickstab()
     local enemy_pos = TargetPlayer.Pos
     local hitbox_size = 49 -- Adjust based on actual hitbox size
     local vertical_range = 82 -- Adjust based on actual vertical range
+
+    local sideMove = cmd:GetSideMove()
+    local forwardMove = cmd:GetForwardMove()
+    local intrickstab = forwardMove > 0 and sideMove ~= 0
 
     -- Get the best positions (corners or origin) based on the direction to the enemy
     local best_positions = get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range)
@@ -591,22 +596,39 @@ local function CalculateTrickstab()
             return simulated_position
         end
     else
-        -- Determine the deviation between the enemy's view angle and your position
-        local view_deviation = NormalizeYaw(enemyYaw - my_yaw)
+        if Menu.Advanced.ManualDirection then
+            -- Manual direction logic using A and D keys
+            local best_pos = emptyVec
 
-        -- If the enemy is looking more to their left, choose the right direction, and vice versa
-        local best_pos = best_positions[3] -- enemy looking right, choose left position
-        if view_deviation > 0 then
-            best_pos = best_positions[2]  -- enemy looking left, choose right position
-        end
+            if sideMove < 0 then
+                best_pos = best_positions[3]  -- Move left relative to the enemy
+            elseif sideMove > 0 then
+                best_pos = best_positions[2]  -- Move right relative to the enemy
+            else
+                -- Fallback to automatic direction based on view deviation
+                local view_deviation = NormalizeYaw(enemyYaw - my_yaw)
+                best_pos = (view_deviation > 0) and best_positions[2] or best_positions[3]
+            end
 
-        local simulated_position = SimulateDash((enemy_pos + best_pos - my_pos), warp.GetChargedTicks() or 24)
-        if CheckBackstab(simulated_position) then
-            return simulated_position
+            local simulated_position = SimulateDash((enemy_pos + best_pos - my_pos), warp.GetChargedTicks() or 24)
+            if CheckBackstab(simulated_position) or Menu.Main.MoveAsistance and intrickstab then
+                -- Move towards the position without warping if Move Assistance is enabled
+                return simulated_position
+            end
+        else
+            -- Automatic direction logic
+            local view_deviation = NormalizeYaw(enemyYaw - my_yaw)
+            local best_pos = (view_deviation > 0) and best_positions[2] or best_positions[3]
+
+            local simulated_position = SimulateDash((enemy_pos + best_pos - my_pos), warp.GetChargedTicks() or 24)
+            if CheckBackstab(simulated_position) or Menu.Main.MoveAsistance and intrickstab then
+                -- Move towards the position without warping if Move Assistance is enabled
+                return simulated_position
+            end
         end
     end
 
-    -- If no valid backstab position is found, return emptyVec
+    -- If no valid backstab position is found and Move Assistance is not enabled, return emptyVec
     return emptyVec
 end
 
@@ -692,57 +714,6 @@ local function WalkTo(cmd, Pos, destination, AdjustView)
     end
 end
 
-
--- Adjusts the walk direction based on input relative to the target position
----@param cmd UserCmd
----@param Pos Vector3
----@param targetPos Vector3
-local function WalkDirected(cmd, Pos, targetPos)
-    -- Combine forward and sideward movements into a single vector
-    local moveDir = Vector3(cmd:GetForwardMove(), cmd:GetSideMove(), 0)
-
-    -- Normalize the movement direction
-    local normalizedMoveDir = Normalize(moveDir)
-
-    -- Create a separate vector for the look direction with the sidemove inverted
-    local lookDir = Vector3(cmd:GetForwardMove(), -cmd:GetSideMove(), 0)
-
-    -- Normalize the look direction
-    local normalizedLookDir = Normalize(lookDir)
-
-    -- Calculate the desired aim direction based on normalized side and forward movement
-    local lookAngle = math.atan(normalizedLookDir.y, normalizedLookDir.x)
-    local aimAngle = math.deg(lookAngle)
-
-    -- Get the current view angles
-    local viewAngles = engine.GetViewAngles()
-
-    -- Calculate the base yaw angle towards the target position
-    local baseYaw = PositionYaw(Pos, targetPos)
-
-    -- If player is moving (normalizedMoveDir has length), adjust view angles to align with look direction
-    if normalizedMoveDir.x ~= 0 or normalizedMoveDir.y ~= 0 then
-        local correctedAngle = baseYaw + aimAngle
-
-        -- Normalize and set the corrected yaw angle
-        correctedAngle = NormalizeYaw(correctedAngle)
-
-        -- Validate the corrected angle
-        if IsNaN(correctedAngle) then
-            print("Error: correctedAngle is NaN")
-            return
-        end
-
-        -- Set view angles
-        local newViewAngles = EulerAngles(viewAngles.pitch, correctedAngle, viewAngles.roll)
-        engine.SetViewAngles(newViewAngles)
-
-        -- Adjust forward and sidemove based on normalized direction
-        cmd:SetForwardMove(normalizedMoveDir.x * 450)
-        cmd:SetSideMove(normalizedMoveDir.y * 450)
-    end
-end
-
 local function getBool(event, name)
 	local bool = event:GetInt(name)
 	return bool == 1
@@ -801,43 +772,52 @@ local globalCounter = 0
 local BackstabPos = emptyVec
 
 local function AutoWarp(cmd)
-    BackstabPos = CalculateTrickstab()
+    local sideMove = cmd:GetSideMove()
+    local forwardMove = cmd:GetForwardMove()
+
+    BackstabPos = CalculateTrickstab(cmd)
 
     -- Main logic
     if BackstabPos ~= emptyVec then
-        local Movedirection = PositionYaw(pLocalPos, pLocal:EstimateAbsVelocity())
+        local MoveDirection = PositionYaw(pLocalPos, pLocal:EstimateAbsVelocity())
         local WarpDir = PositionYaw(pLocalPos, BackstabPos)
+        local canstab = CheckBackstab(BackstabPos)
 
-        if Menu.Main.MoveAsistance then
-            --WalkDirected(cmd, pLocalPos, BackstabPos)
+        if Menu.Main.MoveAsistance and not canstab then
+            -- Only walk towards the target if moving forward or sideways
+            if forwardMove > 0 or sideMove ~= 0 then
+                -- Enable fake lag before walking towards the target
+                FakelagOn()
+                WalkTo(cmd, pLocalPos, BackstabPos, false)
+                return  -- Skip the warp logic if movement assistance is active
+            end
+            FakelagOff()
         end
 
-        if Menu.Advanced.AutoWarp and not warp.IsWarping() and warp.CanWarp() and warp.GetChargedTicks() > 22 then
-            -- Trigger warp after changing direction and disable fakelag so warp works right
+        if Menu.Advanced.AutoWarp and canstab and not warp.IsWarping() and warp.CanWarp() and warp.GetChargedTicks() >= 23 then
+            -- Disable fake lag to ensure warp works correctly
             FakelagOff()
+
             if Menu.Main.AutoWalk then
                 -- Walk to the backstab position if AutoWalk is enabled
                 WalkTo(cmd, pLocalPos, BackstabPos, true)
-                if Menu.Main.AutoWarp then
-                    local acceptable = CompareYawDirections(Movedirection, WarpDir, Menu.Advanced.WarpTolerance)
-                    if acceptable then
-                        warp.TriggerWarp()
-                    end
+                -- Only warp if the direction is acceptable
+                local acceptable = CompareYawDirections(MoveDirection, WarpDir, Menu.Advanced.WarpTolerance)
+                if acceptable then
+                    warp.TriggerWarp()
                 end
             end
-        elseif Menu.Advanced.AutoWarp and Menu.Main.AutoBlink and not warp.IsWarping() and warp.GetChargedTicks() < 22 then
+        elseif canstab then
+            -- Enable fake lag when warp isn't possible or backstab isn't viable
             FakelagOn()
-        else
-            FakelagOff()
         end
-    --[[elseif Menu.Main.AutoWalk and positions[SIMULATION_TICKS] then
-        -- Walk to the specified position if AutoWalk is enabled
-        WalkTo(cmd, pLocalPos, positions[SIMULATION_TICKS], false)
-        if Menu.Advanced.AutoWarp and not warp.CanWarp() and not warp.IsWarping() and warp.GetChargedTicks() > 22 then
-            gui.SetValue("fake lag", 1)
-        end]]
+    else
+        -- If no backstab position is found, disable fake lag as there's no action needed
+        FakelagOff()
     end
 end
+
+
 
 local function OnCreateMove(cmd)
     if not Menu.Main.Active then return end
@@ -1003,8 +983,8 @@ local function doDraw()
 
             ImMenu.BeginFrame(1)
                 Menu.Main.AutoBlink  = ImMenu.Checkbox("Auto Blink ", Menu.Main.AutoBlink )
-                ImMenu.Text("Assistance (WIP)")
-                --Menu.Main.MoveAsistance = ImMenu.Checkbox("Move Asistance", Menu.Main.MoveAsistance)
+                --ImMenu.Text("Assistance (WIP)")
+                Menu.Main.MoveAsistance = ImMenu.Checkbox("Move Asistance", Menu.Main.MoveAsistance)
             ImMenu.EndFrame()
         end
 
