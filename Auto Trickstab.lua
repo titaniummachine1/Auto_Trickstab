@@ -272,9 +272,13 @@ local function UpdateTarget()
     local maxAttackDistance = 225  -- Attack range plus warp distance
     --local maxBacktrackDistance = 670 -- Max backtrack distance
     local bestDistance = maxAttackDistance + 1  -- Initialize to a large number
+    local ignoreinvisible = (gui.GetValue("ignore cloaked"))
 
     for _, player in pairs(allPlayers) do
-        if player:IsAlive() and not player:IsDormant() and player:GetTeamNumber() ~= pLocal:GetTeamNumber() then
+        if player:IsAlive()
+            and not player:IsDormant()
+            and player:GetTeamNumber() ~= pLocal:GetTeamNumber()
+            and (ignoreinvisible == 1 and not player:InCond(4)) then
 
             local playerPos = player:GetAbsOrigin()
             local distance = (pLocalPos - playerPos):Length()
@@ -309,18 +313,50 @@ local function CheckYawDelta(angle1, angle2)
     return (difference > 0 and difference < 89) or (difference < 0 and difference > -89)
 end
 
-local function IsInRange(TargetPos, spherePos, sphereRadius)
-    local hitbox_min = TargetPos + vHitbox.Min
-    local hitbox_max = TargetPos + vHitbox.Max
+local SwingHullSize = 38
+local SwingHalfhullSize = SwingHullSize / 2
+local SwingHull = {Min = Vector3(-SwingHalfhullSize,-SwingHalfhullSize,-SwingHalfhullSize), Max = Vector3(SwingHalfhullSize,SwingHalfhullSize,SwingHalfhullSize)}
 
+-- Function to check if target is in range
+local function IsInRange(targetPos, spherePos, sphereRadius)
+    local hitbox_min_trigger = targetPos + vHitbox.Min
+    local hitbox_max_trigger = targetPos + vHitbox.Max
+
+    -- Calculate the closest point on the hitbox to the sphere
     local closestPoint = Vector3(
-        math.max(hitbox_min.x, math.min(spherePos.x, hitbox_max.x)),
-        math.max(hitbox_min.y, math.min(spherePos.y, hitbox_max.y)),
-        math.max(hitbox_min.z, math.min(spherePos.z, hitbox_max.z))
+        math.max(hitbox_min_trigger.x, math.min(spherePos.x, hitbox_max_trigger.x)),
+        math.max(hitbox_min_trigger.y, math.min(spherePos.y, hitbox_max_trigger.y)),
+        math.max(hitbox_min_trigger.z, math.min(spherePos.z, hitbox_max_trigger.z))
     )
 
-    local distance = (spherePos - closestPoint):Length()
-    return distance < sphereRadius
+    -- Calculate the squared distance from the closest point to the sphere center
+    local distanceSquared = (spherePos - closestPoint):LengthSqr()
+
+    -- Check if the target is within the sphere radius squared
+    if sphereRadius * sphereRadius > distanceSquared then
+        -- Calculate the direction from spherePos to closestPoint
+        local direction = Normalize(closestPoint - spherePos)
+        local SwingtraceEnd = spherePos + direction * sphereRadius
+
+        if Menu.Advanced.AdvancedPred then
+            local trace = engine.TraceLine(spherePos, SwingtraceEnd, MASK_SHOT_HULL)
+            if trace.entity == TargetPlayer.entity then
+                return true, closestPoint
+            else
+                trace = engine.TraceHull(spherePos, SwingtraceEnd, SwingHull.Min, SwingHull.Max, MASK_SHOT_HULL)
+                if trace.entity == TargetPlayer.entity then
+                    return true, closestPoint
+                else
+                    return false, nil
+                end
+            end
+        end
+
+        return true, closestPoint
+    else
+        -- Target is not in range
+        return false, nil
+    end
 end
 
 local function CheckBackstab(testPoint)
@@ -867,7 +903,7 @@ local function doDraw()
 
     --draw.Text(5, 5, "[Auto trickstab | fps: " .. current_fps .. "]")]]
 
-    if Menu.Visuals.Active then
+    if Menu.Visuals.Active and TargetPlayer and TargetPlayer.Pos then
         -- Visualize Simulated Positions
         if Menu.Visuals.VisualizePoints and positions then
             for _, point in ipairs(positions) do
