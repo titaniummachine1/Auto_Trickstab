@@ -21,13 +21,10 @@ if (not(menuLoaded)) then client.ChatPrintf("\x07FF0000ImMenu failed to load!");
 assert(menuLoaded, "ImMenu not found, please install it!")
 assert(ImMenu.GetVersion() >= 0.66, "ImMenu version is too old, please update it!")
 
-
-
 local Math, Conversion = lnxLib.Utils.Math, lnxLib.Utils.Conversion
 local WPlayer, WWeapon = lnxLib.TF2.WPlayer, lnxLib.TF2.WWeapon
 local Helpers = lnxLib.TF2.Helpers
 local Prediction = lnxLib.TF2.Prediction
-
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
@@ -49,7 +46,7 @@ local Menu = { -- this is the config that will be loaded every time u load the s
     },
 
     Advanced = {
-        WarpTolerance = 120,
+        WarpTolerance = 180,
         AutoRecharge = true,
         ManualDirection = false,
     },
@@ -60,20 +57,24 @@ local Menu = { -- this is the config that will be loaded every time u load the s
         VisualizeStabPoint = true,
         VisualizeUsellesSimulations = true,
         Attack_Circle = false,
-        ForwardLine = false,
+        BackLine = false,
     },
 }
 
-local pLocal = entities.GetLocalPlayer()
-local pLocalPos
-local pLocalViewPos
-local vHitbox = { Min = Vector3(-23.99, -23.99, 0), Max = Vector3(23.99, 23.99, 82) }
+local pLocal = entities.GetLocalPlayer() or nil
 local emptyVec = Vector3(0,0,0)
+
+local pLocalPos = emptyVec
+local pLocalViewPos = emptyVec
+local pLocalViewOffset = Vector3(0, 0, 75)
+local vHitbox = { Min = Vector3(-23.99, -23.99, 0), Max = Vector3(23.99, 23.99, 82) }
+
 local TargetPlayer = {}
 local endwarps = {}
+
 -- Constants
 local BACKSTAB_RANGE = 66  -- Hammer units
-local world = entities.FindByClass("CWorld")[0]
+--local world = entities.FindByClass("CWorld")[0]
 
 local lastToggleTime = 0
 local Lbox_Menu_Open = true
@@ -199,7 +200,12 @@ end
 -- Normalize a yaw angle to the range [-180, 180]
 local function NormalizeYaw(yaw)
     yaw = yaw % 360
-    return yaw - 360 * math.floor((yaw + 180) / 360)
+    if yaw > 180 then
+        yaw = yaw - 360
+    elseif yaw < -180 then
+        yaw = yaw + 360
+    end
+    return yaw
 end
 
 
@@ -223,6 +229,7 @@ local function PositionAngles(source, dest)
     return EulerAngles(pitch, yaw, 0)
 end
 
+local positions = {}
 -- Function to update the cache for the local player and loadout slot
 local function UpdateLocalPlayerCache()
     pLocal = entities.GetLocalPlayer()
@@ -234,12 +241,18 @@ local function UpdateLocalPlayerCache()
     then return false end
 
     --cachedLoadoutSlot2 = pLocal and pLocal:GetEntityForLoadoutSlot(2) or nil
-    pLocalViewPos = pLocal and (pLocal:GetAbsOrigin() + pLocal:GetPropVector("localdata", "m_vecViewOffset[0]")) or pLocalPos or emptyVec
+    pLocalViewOffset = pLocal:GetPropVector("localdata", "m_vecViewOffset[0]")
     pLocalPos = pLocal:GetAbsOrigin()
+    pLocalViewPos = pLocal and (pLocal:GetAbsOrigin() + pLocalViewOffset) or pLocalPos or emptyVec
+
+    endwarps = {}
+    positions = {}
+    TargetPlayer = {}
+
     return pLocal
 end
 
--- Calculate the backward vector based on the player's eye angles
+--[[Calculate the backward vector based on the player's eye angles
 local function CalculateforwardVector(player)
     local forwardAngle = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]")
     -- Convert angles from degrees to radians
@@ -251,7 +264,7 @@ local function CalculateforwardVector(player)
     local y = math.cos(pitchRad) * math.sin(yawRad)
 
     return Vector3(x, y, 0)
-end
+end]]
 
 local function UpdateTarget()
     local allPlayers = entities.FindByClass("CTFPlayer")
@@ -262,22 +275,21 @@ local function UpdateTarget()
 
     for _, player in pairs(allPlayers) do
         if player:IsAlive() and not player:IsDormant() and player:GetTeamNumber() ~= pLocal:GetTeamNumber() then
-            local playerIndex = player:GetIndex()
+
             local playerPos = player:GetAbsOrigin()
             local distance = (pLocalPos - playerPos):Length()
+            local viewDirection = EulerAngles(player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]"):Unpack())
 
             -- Check if the player is within the attack range
             if distance < maxAttackDistance and distance < bestDistance then
                 bestDistance = distance
                 local viewoffset = player:GetPropVector("localdata", "m_vecViewOffset[0]")
                 bestTargetDetails = {
-                    idx = playerIndex,
                     entity = player,
                     Pos = playerPos,
                     NextPos = playerPos + player:EstimateAbsVelocity() * globals.TickInterval(),
                     viewpos = playerPos + viewoffset,
-                    hitboxPos = (player:GetHitboxes()[4][1] + player:GetHitboxes()[4][2]) * 0.5,
-                    hitboxForward = CalculateforwardVector(player),
+                    Back = -viewDirection:Forward(),
                 }
             end
         end
@@ -293,13 +305,13 @@ end
 
 local function CheckYawDelta(angle1, angle2)
     local difference = NormalizeYaw(angle1 - angle2)
-    return difference >= 90 or difference <= -90
+    --print(difference)
+    return (difference > 0 and difference < 89) or (difference < 0 and difference > -89)
 end
 
-local function IsInRange(spherePos, sphereRadius)
-    local targetPos = TargetPlayer.Pos
-    local hitbox_min = targetPos + vHitbox.Min
-    local hitbox_max = targetPos + vHitbox.Max
+local function IsInRange(TargetPos, spherePos, sphereRadius)
+    local hitbox_min = TargetPos + vHitbox.Min
+    local hitbox_max = TargetPos + vHitbox.Max
 
     local closestPoint = Vector3(
         math.max(hitbox_min.x, math.min(spherePos.x, hitbox_max.x)),
@@ -308,22 +320,17 @@ local function IsInRange(spherePos, sphereRadius)
     )
 
     local distance = (spherePos - closestPoint):Length()
-    return distance <= sphereRadius
+    return distance < sphereRadius
 end
 
 local function CheckBackstab(testPoint)
-    if not testPoint or not TargetPlayer or not TargetPlayer.Pos then
-        return false
-    end
+    local viewPos = testPoint + pLocalViewOffset -- Adjust for viewpoint
+    local enemyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, TargetPlayer.viewpos + TargetPlayer.Back)) --back direction
+    local spyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, viewPos)) --spy direction
 
-    local viewPos = testPoint + Vector3(0, 0, 75) -- Adjust for viewpoint
-    local enemyYaw = NormalizeYaw(PositionYaw(TargetPlayer.Pos + Vector3(0, 0, 75), TargetPlayer.Pos + TargetPlayer.hitboxForward))
-    local spyYaw = NormalizeYaw(PositionYaw(TargetPlayer.Pos, viewPos))
-
-    if CheckYawDelta(spyYaw, enemyYaw) then
-        if IsInRange(viewPos, BACKSTAB_RANGE) then
-            return true
-        end
+    -- Check if the yaw delta is within the correct backstab angle range
+    if CheckYawDelta(spyYaw, enemyYaw) and IsInRange(TargetPlayer.Pos, viewPos, BACKSTAB_RANGE) then
+        return true
     end
 
     return false
@@ -341,9 +348,7 @@ local function adjustDirection(direction, normal, maxAngle)
 end
 
 -- Constants
-local MAX_SPEED = 320  -- Maximum speed
 local SIMULATION_TICKS = 23  -- Number of ticks for simulation
-local positions = {}
 
 local FORWARD_COLLISION_ANGLE = 55
 local GROUND_COLLISION_ANGLE_LOW = 45
@@ -413,6 +418,8 @@ local function shouldHitEntityFun(entity, player)
     if entity:GetTeamNumber() == player:GetTeamNumber() then return false end --ignore teammates
     return true
 end
+
+local MAX_SPEED = 320  -- Maximum speed
 
 -- Simulates movement in a specified direction vector for a player over a given number of ticks
 local function SimulateDash(simulatedVelocity, ticks)
@@ -512,15 +519,15 @@ local direction_to_corners = {
     [-1] = {
         [-1] = {center, corners[1], corners[4]},  -- Top-left
         [0] = {center, corners[2], corners[4]},   -- Left
-        [1] = {center, corners[3], corners[2]}    -- Top-left to bottom-right (corrected)
+        [1] = {center, corners[2], corners[3]}    -- Top-left to bottom-right (corrected)
     },
     [0] = {
         [-1] = {center, corners[1], corners[2]},  -- Up (corrected)
         [0] = {center},                           -- Center
-        [1] = {center, corners[3], corners[4]}    -- Down (corrected)
+        [1] = {center, corners[4], corners[3]}    -- Down (corrected)
     },
     [1] = {
-        [-1] = {center, corners[2], corners[3]},  -- Top-right to bottom-left (corrected)
+        [-1] = {center, corners[3], corners[2]},  -- Top-right to bottom-left (corrected)
         [0] = {center, corners[3], corners[1]},   -- Right
         [1] = {center, corners[4], corners[1]}    -- Bottom-right
     }
@@ -542,10 +549,15 @@ end
 
 local function get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range)
     local direction = determine_direction(my_pos, enemy_pos, hitbox_size, vertical_range)
-    local bestcorners = direction_to_corners[direction[1]][direction[2]]
+    local bestcorners = direction_to_corners[direction[1]] and direction_to_corners[direction[1]][direction[2]]
+
+    if not bestcorners then
+        print("Invalid direction detected:", direction[1], direction[2])
+        return {center}  -- Fallback to center if direction is invalid
+    end
+
     return bestcorners
 end
- 
 
 local function CalculateTrickstab()
     -- Ensure pLocal and TargetPlayer are valid and have position data
@@ -558,7 +570,7 @@ local function CalculateTrickstab()
         return emptyVec
     end
 
-    local my_pos = pLocal:GetAbsOrigin()
+    local my_pos = pLocalPos
     local enemy_pos = TargetPlayer.Pos
     local hitbox_size = 49 -- Adjust based on actual hitbox size
     local vertical_range = 82 -- Adjust based on actual vertical range
@@ -566,9 +578,9 @@ local function CalculateTrickstab()
     -- Get the best positions (corners or origin) based on the direction to the enemy
     local best_positions = get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range)
 
-    -- Check if we are within backstab yaw range
-    local my_yaw = PositionYaw(my_pos, enemy_pos)
-    local enemyYaw = NormalizeYaw(PositionYaw(enemy_pos + Vector3(0, 0, 75), enemy_pos + TargetPlayer.hitboxForward))
+    -- Calculate yaw angles
+    local my_yaw = PositionYaw(enemy_pos, my_pos)
+    local enemyYaw = NormalizeYaw(PositionYaw(enemy_pos + Vector3(0, 0, 75), enemy_pos + TargetPlayer.Back))
     local spyYaw = NormalizeYaw(PositionYaw(enemy_pos, my_pos + Vector3(0, 0, 75)))
 
     if CheckYawDelta(spyYaw, enemyYaw) then
@@ -579,17 +591,16 @@ local function CalculateTrickstab()
             return simulated_position
         end
     else
-        -- Determine the best direction (left or right)
-        local left_pos = enemy_pos + best_positions[2]
-        local right_pos = enemy_pos + best_positions[3]
-        local left_yaw = PositionYaw(my_pos, left_pos)
-        local right_yaw = PositionYaw(my_pos, right_pos)
-        local left_diff = math.abs(NormalizeYaw(my_yaw - left_yaw))
-        local right_diff = math.abs(NormalizeYaw(my_yaw - right_yaw))
+        -- Determine the deviation between the enemy's view angle and your position
+        local view_deviation = NormalizeYaw(enemyYaw - my_yaw)
 
-        -- Choose the best direction
-        local best_pos = left_diff < right_diff and left_pos or right_pos
-        local simulated_position = SimulateDash(best_pos - my_pos, warp.GetChargedTicks() or 24)
+        -- If the enemy is looking more to their left, choose the right direction, and vice versa
+        local best_pos = best_positions[3] -- enemy looking right, choose left position
+        if view_deviation > 0 then
+            best_pos = best_positions[2]  -- enemy looking left, choose right position
+        end
+
+        local simulated_position = SimulateDash((enemy_pos + best_pos - my_pos), warp.GetChargedTicks() or 24)
         if CheckBackstab(simulated_position) then
             return simulated_position
         end
@@ -598,7 +609,6 @@ local function CalculateTrickstab()
     -- If no valid backstab position is found, return emptyVec
     return emptyVec
 end
-
 
 -- Check if a value is NaN
 local function IsNaN(value)
@@ -614,17 +624,24 @@ local function ComputeMove(cmd, a, b)
     local diff = (b - a)
     if diff:Length() == 0 then return Vector3(0, 0, 0) end
 
-    local x = diff.x
-    local y = diff.y
-    local vSilent = Vector3(x, y, 0)
+    local vSilent = Vector3(diff.x, diff.y, 0)
 
+    -- Calculate angles and adjust based on current view angles
     local ang = vSilent:Angles()
     local cPitch, cYaw, cRoll = engine.GetViewAngles():Unpack()
     local yaw = math.rad(ang.y - cYaw)
-    local pitch = math.rad(ang.x - cPitch)
-    local move = Vector3(math.cos(yaw) * 320, -math.sin(yaw) * 320, 0)
 
-    return move
+    -- Calculate movement vector based on adjusted yaw
+    local moveX = math.cos(yaw) * MAX_SPEED
+    local moveY = -math.sin(yaw) * MAX_SPEED
+
+    -- Check for NaN values and correct them
+    if IsNaN(moveX) or IsNaN(moveY) then
+        print("Warning: NaN detected, falling back to forward direction")
+        return Vector3(MAX_SPEED, 0, 0)  -- Move forward as fallback
+    end
+
+    return Vector3(moveX, moveY, 0)
 end
 
 -- Walks to the destination and sets the global move direction
@@ -633,8 +650,8 @@ end
 ---@param destination Vector3
 ---@param AdjustView boolean
 local function WalkTo(cmd, Pos, destination, AdjustView)
-    -- Check if Warp is possible and player's velocity is high enough
-    if AdjustView and AdjustView == true and pLocal and warp.CanWarp() and not warp.IsWarping() then
+    -- Adjust the view only if necessary
+    if AdjustView and pLocal and warp.CanWarp() and not warp.IsWarping() then
         local forwardMove = cmd:GetForwardMove()
         local sideMove = cmd:GetSideMove()
 
@@ -648,32 +665,31 @@ local function WalkTo(cmd, Pos, destination, AdjustView)
         local baseYaw = PositionYaw(destination, Pos)
         local adjustedYaw = NormalizeYaw(baseYaw + moveDirectionAngle)
 
-        -- Validate the adjusted yaw
+        -- Validate the adjusted yaw, fallback to base yaw if NaN is detected
         if IsNaN(adjustedYaw) then
-            print("Error: adjustedYaw is NaN")
-            return
+            print("Warning: adjustedYaw is NaN, skipping view angle adjustment")
+        else
+            -- Set view angles only if valid
+            local currentAngles = engine.GetViewAngles()
+            local newViewAngles = EulerAngles(currentAngles.pitch, adjustedYaw, 0)
+            engine.SetViewAngles(newViewAngles)
         end
-
-        -- Set view angles
-        local currentAngles = engine.GetViewAngles()
-        local newViewAngles = EulerAngles(currentAngles.pitch, adjustedYaw, 0)
-        engine.SetViewAngles(newViewAngles)
     end
 
     -- Compute the move towards the destination
     local moveToDestination = ComputeMove(cmd, Pos, destination)
 
-    -- Normalize and apply the move command
+    -- Normalize and apply the move command, with fallback for NaN detection
     moveToDestination = Normalize(moveToDestination) * 450
 
-    -- Validate move direction components
     if IsNaN(moveToDestination.x) or IsNaN(moveToDestination.y) then
-        print("Error: moveToDestination contains NaN values")
-        return
+        print("Warning: moveToDestination contains NaN values, falling back to forward move")
+        cmd:SetForwardMove(450)  -- Fallback to moving forward
+        cmd:SetSideMove(0)
+    else
+        cmd:SetForwardMove(moveToDestination.x)
+        cmd:SetSideMove(moveToDestination.y)
     end
-
-    cmd:SetForwardMove(moveToDestination.x)
-    cmd:SetSideMove(moveToDestination.y)
 end
 
 
@@ -825,13 +841,10 @@ end
 
 local function OnCreateMove(cmd)
     if not Menu.Main.Active then return end
+    CheckMenu() -- ensures sync between menu and lbox gui
 
     -- Inside your OnCreateMove or similar function where you check for input
-    CheckMenu() -- ensures sync between menu and lbox gui
     if UpdateLocalPlayerCache() == false or not pLocal then return end  -- Update local player data every tick
-    endwarps = {}
-    positions = {}
-    TargetPlayer = {}
 
     -- Get the local player's active weapon
     local pWeapon = pLocal:GetPropEntity("m_hActiveWeapon")
@@ -847,7 +860,7 @@ local function OnCreateMove(cmd)
     -- Calculate latency in seconds
     local latOut = clientstate.GetLatencyOut()
     local latIn = clientstate.GetLatencyIn()
-    lerp = client.GetConVar("cl_interp") or 0
+    lerp = (client.GetConVar("cl_interp") + latOut + latIn) or 0
     Latency = Conversion.Time_to_Ticks(latOut + latIn + lerp)
 
     if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 and not warp.CanWarp() then
@@ -907,7 +920,7 @@ local function doDraw()
 
         -- Visualize Attack Circle
         if Menu.Visuals.Attack_Circle and pLocal then
-            local center = pLocal:GetAbsOrigin() -- Center of the circle at the player's feet
+            local centerPOS = pLocal:GetAbsOrigin() -- Center of the circle at the player's feet
             local viewPos = pLocalViewPos -- View position to shoot traces from
             local radius = 220 -- Radius of the circle
             local segments = 32 -- Number of segments to draw the circle
@@ -924,7 +937,7 @@ local function doDraw()
             -- Calculate vertices and adjust based on trace results
             for i = 1, segments do
                 local angle = angleStep * i
-                local circlePoint = center + Vector3(math.cos(angle), math.sin(angle), 0) * radius
+                local circlePoint = centerPOS + Vector3(math.cos(angle), math.sin(angle), 0) * radius
 
                 local trace = engine.TraceLine(viewPos, circlePoint, MASK_SHOT_HULL)
                 local endPoint = trace.fraction < 1.0 and trace.endpos or circlePoint
@@ -942,17 +955,13 @@ local function doDraw()
         end
 
         -- Visualize Forward Line
-        if Menu.Visuals.ForwardLine and TargetPlayer and TargetPlayer.FPos then
-            local forward = TargetPlayer.hitboxForward
-            local hitboxPos = TargetPlayer.hitboxPos
+        if Menu.Visuals.BackLine and TargetPlayer then
+            local Back = TargetPlayer.Back
+            local hitboxPos = TargetPlayer.viewpos
 
-            -- Calculate end point of the line in the forward direction
+            -- Calculate end point of the line in the backward direction
             local lineLength = 50  -- Length of the line, you can adjust this as needed
-            local endPoint = Vector3(
-                hitboxPos.x + forward.x * lineLength,
-                hitboxPos.y + forward.y * lineLength,
-                hitboxPos.z + forward.z * lineLength
-            )
+            local endPoint = hitboxPos + (Back * lineLength)  -- Move in the backward direction
 
             -- Convert 3D points to screen space
             local screenStart = client.WorldToScreen(hitboxPos)
@@ -960,21 +969,20 @@ local function doDraw()
 
             -- Draw line
             if screenStart and screenEnd then
-                draw.Color(0, 255, 255, 255)  -- Cyan color, change as needed
+                draw.Color(0, 255, 255, 255)  -- White color, change as needed
                 draw.Line(screenStart[1], screenStart[2], screenEnd[1], screenEnd[2])
             end
-        end
+        end  
     end
 
 
 
 -----------------------------------------------------------------------------------------------------
     --Menu
-
     CheckMenu()
 
     if Lbox_Menu_Open == true and ImMenu and ImMenu.Begin("Auto Trickstab", true) then
-        ImMenu.BeginFrame() -- tabs
+        ImMenu.BeginFrame(1) -- tabs
             local tabs = {"Main", "Advanced", "Visuals"}
             Menu.currentTab = ImMenu.TabControl(tabs, Menu.currentTab)
         ImMenu.EndFrame()
@@ -1008,7 +1016,7 @@ local function doDraw()
 
             ImMenu.BeginFrame(1)
             print(Menu.Advanced.WarpTolerance)
-                Menu.Advanced.WarpTolerance = ImMenu.Slider("Warp Tolerance", Menu.Advanced.WarpTolerance, 1, 360)
+                Menu.Advanced.WarpTolerance = ImMenu.Slider("Warp Tolerance", Menu.Advanced.WarpTolerance, 1, 180)
             ImMenu.EndFrame()
 
             ImMenu.BeginFrame(1)
@@ -1029,7 +1037,7 @@ local function doDraw()
 
             ImMenu.BeginFrame(1)
                 Menu.Visuals.Attack_Circle = ImMenu.Checkbox("Attack Circle", Menu.Visuals.Attack_Circle)
-                Menu.Visuals.ForwardLine = ImMenu.Checkbox("Forward Line", Menu.Visuals.ForwardLine)
+                Menu.Visuals.BackLine = ImMenu.Checkbox("Forward Line", Menu.Visuals.BackLine)
             ImMenu.EndFrame()
         end
         ImMenu.End()
