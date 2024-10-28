@@ -853,7 +853,27 @@ local function AutoWarp(cmd)
     end
 end
 
+local LastAttackTick = 0
+local CanAttackNow = false
 
+-- Function to check if the weapon can attack right now
+function IsReadyToAttack(cmd, weapon)
+    local TickCount = globals.TickCount()
+    -- Get the weapon's next available attack time in ticks
+    local NextAttackTick = Conversion.Time_to_Ticks(weapon:GetPropFloat("m_flNextPrimaryAttack") or 0)
+
+    -- Check if the weapon's next attack time is less than or equal to the current tick
+    if NextAttackTick <= TickCount then
+        LastAttackTick = TickCount  -- Update the last attack tick to the current tick
+        CanAttackNow = true         -- Set flag to indicate attack can happen now
+        return true                 -- Ready to attack this tick
+    else
+        CanAttackNow = false        -- Set flag to false if not ready to attack
+    end
+
+    -- Return false if not ready to attack on this tick
+    return false
+end
 
 local function OnCreateMove(cmd)
     if not Menu.Main.Active then return end
@@ -865,6 +885,8 @@ local function OnCreateMove(cmd)
     -- Get the local player's active weapon
     local pWeapon = pLocal:GetPropEntity("m_hActiveWeapon")
     if not pWeapon or not pWeapon:IsMeleeWeapon() then return end -- Return if the local player doesn't have an active weapon
+    if pLocal:InCond(4) then return end
+    if not IsReadyToAttack(cmd, pWeapon) then return end
 
     TargetPlayer = UpdateTarget()
     if TargetPlayer == {} then
