@@ -863,7 +863,7 @@ function IsReadyToAttack(cmd, weapon)
     local NextAttackTick = Conversion.Time_to_Ticks(weapon:GetPropFloat("m_flNextPrimaryAttack") or 0)
 
     -- Check if the weapon's next attack time is less than or equal to the current tick
-    if NextAttackTick <= TickCount then
+    if NextAttackTick <= TickCount and warp.CanDoubleTap(weapon) then
         LastAttackTick = TickCount  -- Update the last attack tick to the current tick
         CanAttackNow = true         -- Set flag to indicate attack can happen now
         return true                 -- Ready to attack this tick
