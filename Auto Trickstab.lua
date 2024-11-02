@@ -745,7 +745,7 @@ local function damageLogger(event)
         pLocal = entities:GetLocalPlayer()
 
         local attacker = entities.GetByUserID(event:GetInt("attacker"))
-        if pLocal:GetIndex() == attacker:GetIndex() then --getBool(event, "crit")
+        if attacker and attacker:IsValid() and pLocal:GetIndex() == attacker:GetIndex() then --getBool(event, "crit")
             killed = true  -- Flag a kill to trigger recharge
         end
     end
@@ -916,7 +916,7 @@ local function doDraw()
                 if screenPos then
                     if isBackstab then
                         draw.Color(255, 0, 0, 255)  -- Red color for backstab points
-                        draw.FilledRect(screenPos[1] - 4, screenPos[2] - 4, screenPos[1] + 4, screenPos[2] + 4)
+                        draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
                     else
                         draw.Color(255, 255, 255, 255)  -- White color for non-backstab points
                         draw.FilledRect(screenPos[1] - 2, screenPos[2] - 2, screenPos[1] + 2, screenPos[2] + 2)
