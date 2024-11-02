@@ -182,15 +182,6 @@ else
     CreateCFG(string.format([[Lua %s]], Lua__fileName), Menu) -- Save the config
 end
 
--- Function to calculate Manhattan Distance
-local function ManhattanDistance(pos1, pos2)
-    return math.abs(pos1.x - pos2.x) + math.abs(pos1.y - pos2.y) + math.abs(pos1.z - pos2.z)
-end
-
-local M_RADPI = 180 / math.pi
-
-local function isNaN(x) return x ~= x end
-
 -- Normalizes a vector to a unit vector
 -- ultimate Normalize a vector
 local function Normalize(vec)
@@ -208,481 +199,17 @@ local function NormalizeYaw(yaw)
     return yaw
 end
 
-
--- Calculates the angle between two vectors
----@param source Vector3
----@param dest Vector3
----@return EulerAngles angles
-local function PositionAngles(source, dest)
-    local delta = source - dest
-
-    local pitch = math.atan(delta.z / delta:Length2D()) * M_RADPI
-    local yaw = math.atan(delta.y / delta.x) * M_RADPI
-
-    if delta.x >= 0 then
-        yaw = yaw + 180
-    end
-
-    if isNaN(pitch) then pitch = 0 end
-    if isNaN(yaw) then yaw = 0 end
-
-    return EulerAngles(pitch, yaw, 0)
-end
-
-local positions = {}
--- Function to update the cache for the local player and loadout slot
-local function UpdateLocalPlayerCache()
-    pLocal = entities.GetLocalPlayer()
-    if not pLocal
-    or pLocal:GetPropInt("m_iClass") ~= TF2_Spy
-    or not pLocal:IsAlive()
-    or pLocal:InCond(TFCond_Cloaked) or pLocal:InCond(TFCond_CloakFlicker)
-    or pLocal:GetPropInt("m_bFeignDeathReady") == 1
-    then return false end
-
-    --cachedLoadoutSlot2 = pLocal and pLocal:GetEntityForLoadoutSlot(2) or nil
-    pLocalViewOffset = pLocal:GetPropVector("localdata", "m_vecViewOffset[0]")
-    pLocalPos = pLocal:GetAbsOrigin()
-    pLocalViewPos = pLocal and (pLocal:GetAbsOrigin() + pLocalViewOffset) or pLocalPos or emptyVec
-
-    endwarps = {}
-    positions = {}
-    TargetPlayer = {}
-
-    return pLocal
-end
-
---[[Calculate the backward vector based on the player's eye angles
-local function CalculateforwardVector(player)
-    local forwardAngle = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]")
-    -- Convert angles from degrees to radians
-    local pitchRad = math.rad(forwardAngle.x)
-    local yawRad = math.rad(forwardAngle.y)
-
-    -- Calculate the directional vector components
-    local x = math.cos(pitchRad) * math.cos(yawRad)
-    local y = math.cos(pitchRad) * math.sin(yawRad)
-
-    return Vector3(x, y, 0)
-end]]
-
-local function UpdateTarget()
-    local allPlayers = entities.FindByClass("CTFPlayer")
-    local bestTargetDetails = nil
-    local maxAttackDistance = 225  -- Attack range plus warp distance
-    --local maxBacktrackDistance = 670 -- Max backtrack distance
-    local bestDistance = maxAttackDistance + 1  -- Initialize to a large number
-    local ignoreinvisible = (gui.GetValue("ignore cloaked"))
-
-    for _, player in pairs(allPlayers) do
-        if player:IsAlive()
-            and not player:IsDormant()
-            and player:GetTeamNumber() ~= pLocal:GetTeamNumber()
-            and (ignoreinvisible == 1 and not player:InCond(4)) then
-
-            local playerPos = player:GetAbsOrigin()
-            local distance = (pLocalPos - playerPos):Length()
-            local viewDirection = EulerAngles(player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]"):Unpack())
-
-            -- Check if the player is within the attack range
-            if distance < maxAttackDistance and distance < bestDistance then
-                bestDistance = distance
-                local viewoffset = player:GetPropVector("localdata", "m_vecViewOffset[0]")
-                bestTargetDetails = {
-                    entity = player,
-                    Pos = playerPos,
-                    NextPos = playerPos + player:EstimateAbsVelocity() * globals.TickInterval(),
-                    viewpos = playerPos + viewoffset,
-                    Back = -viewDirection:Forward(),
-                }
-            end
-        end
-    end
-
-    return bestTargetDetails
-end
-
 local function PositionYaw(source, dest)
     local delta = Normalize(source - dest)
     return math.deg(math.atan(delta.y, delta.x))
-end
-
-local function CheckYawDelta(angle1, angle2)
-    local difference = NormalizeYaw(angle1 - angle2)
-    return (difference > 0 and difference < 89) or (difference < 0 and difference > -89)
-end
-
-local SwingHullSize = 38
-local SwingHalfhullSize = SwingHullSize / 2
-local SwingHull = {Min = Vector3(-SwingHalfhullSize,-SwingHalfhullSize,-SwingHalfhullSize), Max = Vector3(SwingHalfhullSize,SwingHalfhullSize,SwingHalfhullSize)}
-
--- Function to check if target is in range
-local function IsInRange(targetPos, spherePos, sphereRadius)
-    local hitbox_min_trigger = targetPos + vHitbox.Min
-    local hitbox_max_trigger = targetPos + vHitbox.Max
-
-    -- Calculate the closest point on the hitbox to the sphere
-    local closestPoint = Vector3(
-        math.max(hitbox_min_trigger.x, math.min(spherePos.x, hitbox_max_trigger.x)),
-        math.max(hitbox_min_trigger.y, math.min(spherePos.y, hitbox_max_trigger.y)),
-        math.max(hitbox_min_trigger.z, math.min(spherePos.z, hitbox_max_trigger.z))
-    )
-
-    -- Calculate the squared distance from the closest point to the sphere center
-    local distanceSquared = (spherePos - closestPoint):LengthSqr()
-
-    -- Check if the target is within the sphere radius squared
-    if sphereRadius * sphereRadius > distanceSquared then
-        -- Calculate the direction from spherePos to closestPoint
-        local direction = Normalize(closestPoint - spherePos)
-        local SwingtraceEnd = spherePos + direction * sphereRadius
-
-        if Menu.Advanced.AdvancedPred then
-            local trace = engine.TraceLine(spherePos, SwingtraceEnd, MASK_SHOT_HULL)
-            if trace.entity == TargetPlayer.entity then
-                return true, closestPoint
-            else
-                trace = engine.TraceHull(spherePos, SwingtraceEnd, SwingHull.Min, SwingHull.Max, MASK_SHOT_HULL)
-                if trace.entity == TargetPlayer.entity then
-                    return true, closestPoint
-                else
-                    return false, nil
-                end
-            end
-        end
-
-        return true, closestPoint
-    else
-        -- Target is not in range
-        return false, nil
-    end
-end
-
-local function CheckBackstab(testPoint)
-    local viewPos = testPoint + pLocalViewOffset -- Adjust for viewpoint
-    local enemyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, TargetPlayer.viewpos + TargetPlayer.Back)) --back direction
-    local spyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, viewPos)) --spy direction
-
-    -- Check if the yaw delta is within the correct backstab angle range
-    if CheckYawDelta(spyYaw, enemyYaw) and IsInRange(TargetPlayer.Pos, viewPos, BACKSTAB_RANGE) then
-        return true
-    end
-
-    return false
-end
-
-local function adjustDirection(direction, normal, maxAngle)
-    direction = Normalize(direction)
-    local angle = math.deg(math.acos(normal:Dot(UP_VECTOR)))
-    if angle > maxAngle then
-        return direction
-    end
-    local dot = direction:Dot(normal)
-    direction.z = direction.z - normal.z * dot
-    return direction
-end
-
--- Constants
-local SIMULATION_TICKS = 23  -- Number of ticks for simulation
-
-local FORWARD_COLLISION_ANGLE = 55
-local GROUND_COLLISION_ANGLE_LOW = 45
-local GROUND_COLLISION_ANGLE_HIGH = 55
-
-
--- Function to handle forward collision
-local function handleForwardCollision(vel, wallTrace)
-    local normal = wallTrace.plane
-    local angle = math.deg(math.acos(normal:Dot(Vector3(0, 0, 1))))
-
-    -- Adjust velocity if angle is greater than forward collision angle
-    if angle > FORWARD_COLLISION_ANGLE then
-        -- The wall is steep, adjust velocity to prevent moving into the wall
-        local dot = vel:Dot(normal)
-        vel = vel - normal * dot
-    end
-
-    return wallTrace.endpos.x, wallTrace.endpos.y
-end
-
--- Function to handle ground collision
-local function handleGroundCollision(vel, groundTrace, vUp)
-    local normal = groundTrace.plane
-    local angle = math.deg(math.acos(normal:Dot(vUp)))
-    local onGround = false
-
-    if angle < GROUND_COLLISION_ANGLE_LOW then
-        onGround = true
-    elseif angle < GROUND_COLLISION_ANGLE_HIGH then
-        vel.x, vel.y, vel.z = 0, 0, 0
-    else
-        local dot = vel:Dot(normal)
-        vel = vel - normal * dot
-        onGround = true
-    end
-
-    if onGround then vel.z = 0 end
-    return groundTrace.endpos, onGround
-end
-
--- Cache structure
-local simulationCache = {
-    tickInterval = globals.TickInterval(),
-    gravity = client.GetConVar("sv_gravity"),
-    stepSize = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize") or 0,
-    flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
-}
-
--- Function to update cache (call this when game environment changes)
-local function UpdateSimulationCache()
-    simulationCache.tickInterval = globals.TickInterval()
-    simulationCache.gravity = client.GetConVar("sv_gravity")
-    simulationCache.stepSize = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize") or 0
-    simulationCache.flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
-end
-
-local ignoreEntities = {"CTFAmmoPack", "CTFDroppedWeapon"}
-local function shouldHitEntityFun(entity, player)
-    for _, ignoreEntity in ipairs(ignoreEntities) do --ignore custom
-        if entity:GetClass() == ignoreEntity then
-            return false
-        end
-    end
-
-    if entity:GetName() == player:GetName() then return false end --ignore self
-    if entity:GetTeamNumber() == player:GetTeamNumber() then return false end --ignore teammates
-    return true
-end
-
-local MAX_SPEED = 320  -- Maximum speed
-
-local function SimulateDash(simulatedVelocity, ticks)
-    -- Normalize the simulated velocity and set it to the player's current speed
-    simulatedVelocity = Normalize(simulatedVelocity) * pLocal:EstimateAbsVelocity():Length()
-    local tick_interval = globals.TickInterval()
-
-    -- Set gravity and step size from cached values
-    local gravity = simulationCache.gravity * tick_interval
-    local stepSize = simulationCache.stepSize
-    local vUp = Vector3(0, 0, 1)
-    local vStep = Vector3(0, 0, stepSize or 18)
-
-    -- Helper to determine if an entity should be hit
-    local shouldHitEntity = function(entity) return shouldHitEntityFun(entity, pLocal) end
-
-    -- Initialize simulation state
-    local lastP = pLocalPos
-    local lastV = simulatedVelocity
-    local flags = simulationCache.flags
-    local lastG = (flags & 1 == 1)  -- Check if initially on the ground
-
-    -- Initialize tables to store positions and backstab states
-    positions = {}  -- Stores all tick positions for visualization
-    endwarps = {}   -- Stores warp data for each tick including backstab status
-
-    -- Track the closest backstab opportunity
-    local closestBackstabPos = nil
-    local minWarpTicks = ticks + 1  -- Initialize to a high value outside of tick range
-
-    for i = 1, ticks do
-        -- Calculate the new position based on the velocity
-        local pos = lastP + lastV * tick_interval
-        local vel = lastV
-        local onGround = lastG
-
-        -- Collision and movement logic
-        if Menu.Advanced.ColisionCheck then
-            local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox.Min, vHitbox.Max, MASK_PLAYERSOLID, shouldHitEntity)
-            if wallTrace.fraction < 1 then
-                if wallTrace.entity then
-                    if wallTrace.entity:GetClass() == "CTFPlayer" then
-                        break
-                    else
-                        pos.x, pos.y = handleForwardCollision(vel, wallTrace)
-                    end
-                else
-                    pos.x, pos.y = handleForwardCollision(vel, wallTrace)
-                end
-            end
-
-            local downStep = onGround and vStep or Vector3(0, 0, 0)
-            local groundTrace = engine.TraceHull(pos + vStep, pos - downStep, vHitbox.Min, vHitbox.Max, MASK_PLAYERSOLID, shouldHitEntity)
-            if groundTrace.fraction < 1 then
-                pos, onGround = handleGroundCollision(vel, groundTrace, vUp)
-            else
-                onGround = false
-            end
-        end
-
-        -- Simulate jumping if space is pressed
-        if onGround and input.IsButtonDown(KEY_SPACE) then
-            vel.z = (gui.GetValue("Duck Jump") == 1) and 277 or 271
-            onGround = false
-        end
-
-        -- Apply gravity if not on the ground
-        if not onGround then
-            vel.z = vel.z - gravity
-        end
-
-        -- Check for backstab possibility at the current position
-        local isBackstab = CheckBackstab(pos)
-
-        -- Store each tick position and backstab status for visualization
-        table.insert(positions, pos)
-        table.insert(endwarps, {pos, isBackstab})
-
-        -- Update closest backstab position if available at this tick
-        if isBackstab and i < minWarpTicks then
-            minWarpTicks = i
-            closestBackstabPos = pos
-        end
-
-        -- Update simulation state
-        lastP, lastV, lastG = pos, vel, onGround
-    end
-
-    -- Return closest backstab position, minimum warp ticks, and final simulated position
-    return lastP, closestBackstabPos, minWarpTicks
-end
-
-local corners = {
-    Vector3(-49.0, 49.0, 0.0),  -- top left corner
-    Vector3(49.0, 49.0, 0.0),   -- top right corner
-    Vector3(-49.0, -49.0, 0.0), -- bottom left corner
-    Vector3(49.0, -49.0, 0.0)   -- bottom right corner
-}
-
-local center = Vector3(0, 0, 0)
-
-local direction_to_corners = {
-    [-1] = {
-        [-1] = {center, corners[1], corners[4]},  -- Top-left
-        [0] = {center, corners[2], corners[4]},   -- Left
-        [1] = {center, corners[2], corners[3]}    -- Top-left to bottom-right (corrected)
-    },
-    [0] = {
-        [-1] = {center, corners[1], corners[2]},  -- Up (corrected)
-        [0] = {center},                           -- Center
-        [1] = {center, corners[4], corners[3]}    -- Down (corrected)
-    },
-    [1] = {
-        [-1] = {center, corners[3], corners[2]},  -- Top-right to bottom-left (corrected)
-        [0] = {center, corners[3], corners[1]},   -- Right
-        [1] = {center, corners[4], corners[1]}    -- Bottom-right
-    }
-}
-
-local function determine_direction(my_pos, enemy_pos, hitbox_size, vertical_range)
-    local dx = enemy_pos.x - my_pos.x
-    local dy = enemy_pos.y - my_pos.y
-    local dz = enemy_pos.z - my_pos.z
-    local buffor = 1 --fixing the bug wehre hugging the target makes algoritm think were inside him XD
-
-    local out_of_vertical_range = (math.abs(dz) > vertical_range) and 1 or 0
-
-    local direction_x = ((dx > hitbox_size - buffor) and 1 or 0) - ((dx < -hitbox_size + buffor) and 1 or 0)
-    local direction_y = ((dy > hitbox_size - buffor) and 1 or 0) - ((dy < -hitbox_size + buffor) and 1 or 0)
-
-    return {(direction_x * (1 - out_of_vertical_range)), (direction_y * (1 - out_of_vertical_range))}
-end
-
-local function get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range)
-    local direction = determine_direction(my_pos, enemy_pos, hitbox_size, vertical_range)
-    local bestcorners = direction_to_corners[direction[1]] and direction_to_corners[direction[1]][direction[2]]
-
-    if not bestcorners then
-        print("Invalid direction detected:", direction[1], direction[2])
-        return {center}  -- Fallback to center if direction is invalid
-    end
-
-    return bestcorners
-end
-
-local function CalculateTrickstab(cmd)
-    -- Ensure pLocal and TargetPlayer are valid and have position data
-    if not TargetPlayer or not TargetPlayer.Pos then
-        return emptyVec, nil
-    end
-
-    local my_pos = pLocalPos
-    local enemy_pos = TargetPlayer.Pos
-    local hitbox_size = 49  -- Adjust based on actual hitbox size
-    local vertical_range = 82  -- Adjust based on actual vertical range
-
-    -- Retrieve movement values from command
-    local sideMove = cmd:GetSideMove() or 0
-    local forwardMove = cmd:GetForwardMove() or 0
-    local intrickstab = forwardMove > 0 and sideMove ~= 0
-
-    -- Get the best positions (corners or origin) based on the direction to the enemy
-    local best_positions = get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range) or {}
-
-    -- Fallback if `best_positions` is empty
-    if #best_positions == 0 then
-        return emptyVec, nil
-    end
-
-    -- Calculate yaw angles
-    local my_yaw = PositionYaw(enemy_pos, my_pos)
-    local enemyYaw = NormalizeYaw(PositionYaw(enemy_pos + Vector3(0, 0, 75), enemy_pos + (TargetPlayer.Back or Vector3(0, 0, 0))))
-    local spyYaw = NormalizeYaw(PositionYaw(enemy_pos, my_pos + Vector3(0, 0, 75)))
-
-    -- Track the minimal warp ticks and corresponding backstab position
-    local optimalBackstabPos = nil
-    local minWarpTicks = math.huge  -- Initialize to a very high number
-
-    -- Check if within backstab yaw range
-    if CheckYawDelta(spyYaw, enemyYaw) then
-        -- Try the first best position for backstab
-        local center_pos = enemy_pos + best_positions[1]
-        local final_pos, backstab_pos, warpTicks = SimulateDash(center_pos - my_pos, warp.GetChargedTicks() or 24)
-
-        -- Update the optimal position if it has fewer warp ticks
-        if backstab_pos and warpTicks < minWarpTicks then
-            optimalBackstabPos = backstab_pos
-            minWarpTicks = warpTicks
-        end
-    else
-        local best_pos = emptyVec
-
-        if Menu.Advanced and Menu.Advanced.ManualDirection then
-            -- Manual direction logic using A and D keys
-            if sideMove < 0 then
-                best_pos = best_positions[3] or emptyVec  -- Move left relative to the enemy
-            elseif sideMove > 0 then
-                best_pos = best_positions[2] or emptyVec  -- Move right relative to the enemy
-            else
-                -- Fallback to automatic direction based on view deviation
-                local view_deviation = NormalizeYaw(enemyYaw - my_yaw)
-                best_pos = (view_deviation > 0 and best_positions[2] or best_positions[3]) or emptyVec
-            end
-        else
-            -- Automatic direction logic
-            local view_deviation = NormalizeYaw(enemyYaw - my_yaw)
-            best_pos = (view_deviation > 0 and best_positions[2] or best_positions[3]) or emptyVec
-        end
-
-        -- Simulate dash to the chosen best position
-        if best_pos ~= emptyVec then
-            local final_pos, backstab_pos, warpTicks = SimulateDash((enemy_pos + best_pos - my_pos), warp.GetChargedTicks() or 24)
-
-            -- Update the optimal position if it has fewer warp ticks
-            if backstab_pos and warpTicks < minWarpTicks then
-                optimalBackstabPos = backstab_pos
-                minWarpTicks = warpTicks
-            end
-        end
-    end
-
-    -- Return the optimal backstab position with minimal warp ticks, or emptyVec if none found
-    return optimalBackstabPos or emptyVec, minWarpTicks < math.huge and minWarpTicks or nil
 end
 
 -- Check if a value is NaN
 local function IsNaN(value)
     return value ~= value
 end
+
+local MAX_SPEED = 320  -- Maximum speed
 
 -- Computes the move vector between two points
 ---@param cmd UserCmd
@@ -761,9 +288,432 @@ local function WalkTo(cmd, Pos, destination, AdjustView)
     end
 end
 
-local function getBool(event, name)
-	local bool = event:GetInt(name)
-	return bool == 1
+local BackstabPos = emptyVec
+local globalCounter = 0
+
+-- Function to check if the weapon can attack right now
+function IsReadyToAttack(cmd, weapon)
+    local TickCount = globals.TickCount()
+    local NextAttackTick = Conversion.Time_to_Ticks(weapon:GetPropFloat("m_flNextPrimaryAttack") or 0)
+
+    -- Check if the weapon's next attack time is less than or equal to the current tick
+    if NextAttackTick <= TickCount and warp.CanDoubleTap(weapon) then
+        LastAttackTick = TickCount  -- Update the last attack tick
+        CanAttackNow = true         -- Set flag for readiness
+        return true                 -- Ready to attack this tick
+    else
+        CanAttackNow = false
+    end
+    return false
+end
+
+local positions = {}
+-- Function to update the cache for the local player and loadout slot
+local function UpdateLocalPlayerCache()
+    pLocal = entities.GetLocalPlayer()
+    if not pLocal
+    or pLocal:GetPropInt("m_iClass") ~= TF2_Spy
+    or not pLocal:IsAlive()
+    or pLocal:InCond(TFCond_Cloaked) or pLocal:InCond(TFCond_CloakFlicker)
+    or pLocal:GetPropInt("m_bFeignDeathReady") == 1
+    then return false end
+
+    --cachedLoadoutSlot2 = pLocal and pLocal:GetEntityForLoadoutSlot(2) or nil
+    pLocalViewOffset = pLocal:GetPropVector("localdata", "m_vecViewOffset[0]")
+    pLocalPos = pLocal:GetAbsOrigin()
+    pLocalViewPos = pLocal and (pLocal:GetAbsOrigin() + pLocalViewOffset) or pLocalPos or emptyVec
+
+    endwarps = {}
+    positions = {}
+    TargetPlayer = {}
+
+    return pLocal
+end
+
+local function UpdateTarget()
+    local allPlayers = entities.FindByClass("CTFPlayer")
+    local bestTargetDetails = nil
+    local maxAttackDistance = 225  -- Attack range plus warp distance
+    local bestDistance = maxAttackDistance + 1  -- Initialize to a large number
+    local ignoreinvisible = (gui.GetValue("ignore cloaked"))
+
+    for _, player in pairs(allPlayers) do
+        if player:IsAlive()
+            and not player:IsDormant()
+            and player:GetTeamNumber() ~= pLocal:GetTeamNumber()
+            and (ignoreinvisible == 1 and not player:InCond(4)) then
+
+            local playerPos = player:GetAbsOrigin()
+            local distance = (pLocalPos - playerPos):Length()
+            local viewAngles = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]")  -- Fetching eye angles directly
+            local viewYaw = viewAngles and EulerAngles(viewAngles:Unpack()).yaw or 0
+
+            -- Check if the player is within the attack range
+            if distance < maxAttackDistance and distance < bestDistance then
+                bestDistance = distance
+                local viewoffset = player:GetPropVector("localdata", "m_vecViewOffset[0]")
+                bestTargetDetails = {
+                    entity = player,
+                    Pos = playerPos,
+                    NextPos = playerPos + player:EstimateAbsVelocity() * globals.TickInterval(),
+                    viewpos = playerPos + viewoffset,
+                    viewYaw = viewYaw,  -- Include yaw for backstab calculations
+                    Back = -EulerAngles(viewAngles:Unpack()):Forward(),  -- Ensure Back is accurate
+                }
+            end
+        end
+    end
+
+    return bestTargetDetails
+end
+
+local function CheckYawDelta(angle1, angle2)
+    local difference = NormalizeYaw(angle1 - angle2)
+    return (difference > 0 and difference < 89) or (difference < 0 and difference > -89)
+end
+
+local SwingHullSize = 38
+local SwingHalfhullSize = SwingHullSize / 2
+local SwingHull = {Min = Vector3(-SwingHalfhullSize,-SwingHalfhullSize,-SwingHalfhullSize), Max = Vector3(SwingHalfhullSize,SwingHalfhullSize,SwingHalfhullSize)}
+
+-- Function to check if target is in range
+local function IsInRange(targetPos, spherePos, sphereRadius)
+    local hitbox_min_trigger = targetPos + vHitbox.Min
+    local hitbox_max_trigger = targetPos + vHitbox.Max
+
+    -- Calculate the closest point on the hitbox to the sphere
+    local closestPoint = Vector3(
+        math.max(hitbox_min_trigger.x, math.min(spherePos.x, hitbox_max_trigger.x)),
+        math.max(hitbox_min_trigger.y, math.min(spherePos.y, hitbox_max_trigger.y)),
+        math.max(hitbox_min_trigger.z, math.min(spherePos.z, hitbox_max_trigger.z))
+    )
+
+    -- Calculate the squared distance from the closest point to the sphere center
+    local distanceSquared = (spherePos - closestPoint):LengthSqr()
+
+    -- Check if the target is within the sphere radius squared
+    if sphereRadius * sphereRadius > distanceSquared then
+        -- Calculate the direction from spherePos to closestPoint
+        local direction = Normalize(closestPoint - spherePos)
+        local SwingtraceEnd = spherePos + direction * sphereRadius
+
+        if Menu.Advanced.AdvancedPred then
+            local trace = engine.TraceLine(spherePos, SwingtraceEnd, MASK_SHOT_HULL)
+            if trace.entity == TargetPlayer.entity then
+                return true, closestPoint
+            else
+                trace = engine.TraceHull(spherePos, SwingtraceEnd, SwingHull.Min, SwingHull.Max, MASK_SHOT_HULL)
+                if trace.entity == TargetPlayer.entity then
+                    return true, closestPoint
+                else
+                    return false, nil
+                end
+            end
+        end
+
+        return true, closestPoint
+    else
+        -- Target is not in range
+        return false, nil
+    end
+end
+
+local function CheckBackstab(testPoint)
+    local viewPos = testPoint + pLocalViewOffset -- Adjust for viewpoint
+    local enemyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, TargetPlayer.viewpos + TargetPlayer.Back)) --back direction
+    local spyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, viewPos)) --spy direction
+
+    -- Check if the yaw delta is within the correct backstab angle range
+    if CheckYawDelta(spyYaw, enemyYaw) and IsInRange(TargetPlayer.Pos, viewPos, BACKSTAB_RANGE) then
+        return true
+    end
+
+    return false
+end
+
+-- Constants
+local SIMULATION_TICKS = 23  -- Number of ticks for simulation
+
+local FORWARD_COLLISION_ANGLE = 55
+local GROUND_COLLISION_ANGLE_LOW = 45
+local GROUND_COLLISION_ANGLE_HIGH = 55
+
+
+-- Function to handle forward collision
+local function handleForwardCollision(vel, wallTrace)
+    local normal = wallTrace.plane
+    local angle = math.deg(math.acos(normal:Dot(Vector3(0, 0, 1))))
+
+    -- Adjust velocity if angle is greater than forward collision angle
+    if angle > FORWARD_COLLISION_ANGLE then
+        -- The wall is steep, adjust velocity to prevent moving into the wall
+        local dot = vel:Dot(normal)
+        vel = vel - normal * dot
+    end
+
+    return wallTrace.endpos.x, wallTrace.endpos.y
+end
+
+-- Function to handle ground collision
+local function handleGroundCollision(vel, groundTrace, vUp)
+    local normal = groundTrace.plane
+    local angle = math.deg(math.acos(normal:Dot(vUp)))
+    local onGround = false
+
+    if angle < GROUND_COLLISION_ANGLE_LOW then
+        onGround = true
+    elseif angle < GROUND_COLLISION_ANGLE_HIGH then
+        vel.x, vel.y, vel.z = 0, 0, 0
+    else
+        local dot = vel:Dot(normal)
+        vel = vel - normal * dot
+        onGround = true
+    end
+
+    if onGround then vel.z = 0 end
+    return groundTrace.endpos, onGround
+end
+
+-- Cache structure
+local simulationCache = {
+    tickInterval = globals.TickInterval(),
+    gravity = client.GetConVar("sv_gravity"),
+    stepSize = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize") or 0,
+    flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
+}
+
+-- Function to update cache (call this when game environment changes)
+local function UpdateSimulationCache()
+    simulationCache.tickInterval = globals.TickInterval()
+    simulationCache.gravity = client.GetConVar("sv_gravity")
+    simulationCache.stepSize = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize") or 0
+    simulationCache.flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
+end
+
+local ignoreEntities = {"CTFAmmoPack", "CTFDroppedWeapon"}
+local function shouldHitEntityFun(entity, player)
+    for _, ignoreEntity in ipairs(ignoreEntities) do --ignore custom
+        if entity:GetClass() == ignoreEntity then
+            return false
+        end
+    end
+
+    if entity:GetName() == player:GetName() then return false end --ignore self
+    if entity:GetTeamNumber() == player:GetTeamNumber() then return false end --ignore teammates
+    return true
+end
+
+local function SimulateDash(simulatedVelocity, ticks)
+    -- Normalize the simulated velocity and set it to the player's current speed
+    simulatedVelocity = Normalize(simulatedVelocity) * pLocal:EstimateAbsVelocity():Length()
+    local tick_interval = globals.TickInterval()
+
+    -- Set gravity and step size from cached values
+    local gravity = simulationCache.gravity * tick_interval
+    local stepSize = simulationCache.stepSize
+    local vUp = Vector3(0, 0, 1)
+    local vStep = Vector3(0, 0, stepSize or 18)
+
+    -- Helper to determine if an entity should be hit
+    local shouldHitEntity = function(entity) return shouldHitEntityFun(entity, pLocal) end
+
+    -- Initialize simulation state
+    local lastP = pLocalPos
+    local lastV = simulatedVelocity
+    local flags = simulationCache.flags
+    local lastG = (flags & 1 == 1)  -- Check if initially on the ground
+
+    -- Reset tables for storing positions and backstab states
+    positions = {}  -- Stores all tick positions for visualization
+    endwarps = {}   -- Stores warp data for each tick, including backstab status
+
+    -- Track the closest backstab opportunity
+    local closestBackstabPos = nil
+    local minWarpTicks = ticks + 1  -- Initialize to a high value outside of tick range
+
+    for i = 1, ticks do
+        -- Calculate the new position based on the velocity
+        local pos = lastP + lastV * tick_interval
+        local vel = lastV
+        local onGround = lastG
+
+        -- Collision and movement logic
+        if Menu.Advanced.ColisionCheck then
+            local wallTrace = engine.TraceHull(lastP + vStep, pos + vStep, vHitbox.Min, vHitbox.Max, MASK_PLAYERSOLID, shouldHitEntity)
+            if wallTrace.fraction < 1 then
+                if wallTrace.entity then
+                    if wallTrace.entity:GetClass() == "CTFPlayer" then
+                        break
+                    else
+                        pos.x, pos.y = handleForwardCollision(vel, wallTrace)
+                    end
+                else
+                    pos.x, pos.y = handleForwardCollision(vel, wallTrace)
+                end
+            end
+
+            local downStep = onGround and vStep or Vector3(0, 0, 0)
+            local groundTrace = engine.TraceHull(pos + vStep, pos - downStep, vHitbox.Min, vHitbox.Max, MASK_PLAYERSOLID, shouldHitEntity)
+            if groundTrace.fraction < 1 then
+                pos, onGround = handleGroundCollision(vel, groundTrace, vUp)
+            else
+                onGround = false
+            end
+        end
+
+        -- Simulate jumping if space is pressed
+        if onGround and input.IsButtonDown(KEY_SPACE) then
+            vel.z = (gui.GetValue("Duck Jump") == 1) and 277 or 271
+            onGround = false
+        end
+
+        -- Apply gravity if not on the ground
+        if not onGround then
+            vel.z = vel.z - gravity
+        end
+
+        -- Check for backstab possibility at the current position
+        local isBackstab = CheckBackstab(pos)
+
+        -- Store each tick position and backstab status for visualization
+        positions[i] = pos  -- Store every tick position for later visualization
+        endwarps[i] = {pos, isBackstab}
+
+        -- Update closest backstab position if available at this tick
+        if isBackstab and i < minWarpTicks then
+            minWarpTicks = i
+            closestBackstabPos = pos
+        end
+
+        -- Update simulation state
+        lastP, lastV, lastG = pos, vel, onGround
+    end
+
+    -- Return closest backstab position, minimum warp ticks, and final simulated position
+    return lastP, closestBackstabPos, minWarpTicks
+end
+
+
+local corners = {
+    Vector3(-49.0, 49.0, 0.0),  -- top left corner
+    Vector3(49.0, 49.0, 0.0),   -- top right corner
+    Vector3(-49.0, -49.0, 0.0), -- bottom left corner
+    Vector3(49.0, -49.0, 0.0)   -- bottom right corner
+}
+
+local center = Vector3(0, 0, 0)
+
+local direction_to_corners = {
+    [-1] = {
+        [-1] = {center, corners[1], corners[4]},  -- Top-left
+        [0] = {center, corners[2], corners[4]},   -- Left
+        [1] = {center, corners[2], corners[3]}    -- Top-left to bottom-right (corrected)
+    },
+    [0] = {
+        [-1] = {center, corners[1], corners[2]},  -- Up (corrected)
+        [0] = {center},                           -- Center
+        [1] = {center, corners[4], corners[3]}    -- Down (corrected)
+    },
+    [1] = {
+        [-1] = {center, corners[3], corners[2]},  -- Top-right to bottom-left (corrected)
+        [0] = {center, corners[3], corners[1]},   -- Right
+        [1] = {center, corners[4], corners[1]}    -- Bottom-right
+    }
+}
+
+local function determine_direction(my_pos, enemy_pos, hitbox_size, vertical_range)
+    local dx = enemy_pos.x - my_pos.x
+    local dy = enemy_pos.y - my_pos.y
+    local dz = enemy_pos.z - my_pos.z
+    local buffor = 1 --fixing the bug wehre hugging the target makes algoritm think were inside him XD
+
+    local out_of_vertical_range = (math.abs(dz) > vertical_range) and 1 or 0
+
+    local direction_x = ((dx > hitbox_size - buffor) and 1 or 0) - ((dx < -hitbox_size + buffor) and 1 or 0)
+    local direction_y = ((dy > hitbox_size - buffor) and 1 or 0) - ((dy < -hitbox_size + buffor) and 1 or 0)
+
+    return {(direction_x * (1 - out_of_vertical_range)), (direction_y * (1 - out_of_vertical_range))}
+end
+
+local function get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range)
+    local direction = determine_direction(my_pos, enemy_pos, hitbox_size, vertical_range)
+    local bestcorners = direction_to_corners[direction[1]] and direction_to_corners[direction[1]][direction[2]]
+
+    if not bestcorners then
+        print("Invalid direction detected:", direction[1], direction[2])
+        return {center}  -- Fallback to center if direction is invalid
+    end
+
+    return bestcorners
+end
+
+local BACKSTAB_MAX_YAW_DIFF = 90  -- Maximum allowable yaw difference for backstab
+
+local function CalculateTrickstab(cmd)
+    -- Ensure pLocal and TargetPlayer are valid and have position data
+    if not TargetPlayer or not TargetPlayer.Pos then
+        return emptyVec, nil, nil
+    end
+
+    local my_pos = pLocalPos
+    local enemy_pos = TargetPlayer.Pos
+    local hitbox_size = 49  -- Adjust based on actual hitbox size
+    local vertical_range = 82  -- Adjust based on actual vertical range
+
+    -- Retrieve movement values from command
+    local sideMove = cmd:GetSideMove() or 0
+    local forwardMove = cmd:GetForwardMove() or 0
+    local intrickstab = forwardMove > 0 and sideMove ~= 0
+
+    -- Get the best positions (corners or origin) based on the direction to the enemy
+    local best_positions = get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range) or {}
+
+    -- Fallback if `best_positions` is empty
+    if #best_positions == 0 then
+        return emptyVec, nil, nil
+    end
+
+    -- Track the optimal backstab position based on scoring
+    local optimalBackstabPos = nil
+    local bestScore = -1  -- Initialize to track the highest score
+    local minWarpTicks = math.huge  -- Initialize to a large number
+
+    -- Iterate through each candidate position
+    for _, test_pos in ipairs(best_positions) do
+        -- Simulate the dash to each test position, capturing the potential backstab position and warp ticks
+        local final_pos, backstab_pos, warpTicks = SimulateDash(enemy_pos + test_pos - my_pos, warp.GetChargedTicks() or 24)
+        
+        if backstab_pos then
+            -- Calculate yaw difference and check if it allows backstab
+            local spyYaw = PositionYaw(enemy_pos, backstab_pos)
+            local enemyYaw = TargetPlayer.viewYaw
+            local isWithinBackstabYaw = CheckYawDelta(spyYaw, enemyYaw)
+            
+            -- Only score positions that are within backstab yaw range
+            if isWithinBackstabYaw then
+                -- Calculate yaw difference component for scoring
+                local yawDiff = math.abs(NormalizeYaw(spyYaw - enemyYaw))
+                local yawComponent = math.max(0, 1 - yawDiff / BACKSTAB_MAX_YAW_DIFF)  -- 1 for perfectly aligned, 0 at the edge
+
+                -- Calculate distance component for scoring
+                local distance = (backstab_pos - enemy_pos):Length()
+                local distanceComponent = math.max(0, math.min(1, (120 - distance) / (120 - 48)))  -- 1 for close, 0 at max range
+
+                -- Combine yaw and distance into a single score
+                local score = 0.5 * yawComponent + 0.5 * distanceComponent  -- Equal weight to both components
+
+                -- Update optimal position if this position has the highest score and fewer warp ticks
+                if score > bestScore or (score == bestScore and warpTicks < minWarpTicks) then
+                    bestScore = score
+                    optimalBackstabPos = backstab_pos
+                    minWarpTicks = warpTicks  -- Set minWarpTicks to the ticks needed for this best position
+                end
+            end
+        end
+    end
+
+    -- Return the optimal backstab position, best score, and minimum warp ticks needed
+    return optimalBackstabPos or emptyVec, bestScore, minWarpTicks
 end
 
 local killed = false
@@ -813,104 +763,70 @@ local function CompareYawDirections(yaw1, yaw2, tolerance)
     return difference <= tolerance or difference >= (360 - tolerance)
 end
 
-local BackstabPos = emptyVec
-local tickCounteratack = 0
-local CanAttackNow = false
-local Latency = 0
-local lerp = 0
-local globalCounter = 0
+-- Function to handle controlled warp without triggering attacks
+local function PerformControlledWarp(cmd, targetPos, warpTicks)
+    -- Set the necessary number of ticks for the warp
+    client.RemoveConVarProtection("sv_maxusrcmdprocessticks")
+    client.SetConVar("sv_maxusrcmdprocessticks", warpTicks, true)
 
--- Function to check if the weapon can attack right now
-function IsReadyToAttack(cmd, weapon)
-    local TickCount = globals.TickCount()
-    local NextAttackTick = Conversion.Time_to_Ticks(weapon:GetPropFloat("m_flNextPrimaryAttack") or 0)
+    -- Move to target position
+    WalkTo(cmd, pLocalPos, targetPos, true)  -- Align movement towards the target
 
-    -- Check if the weapon's next attack time is less than or equal to the current tick
-    if NextAttackTick <= TickCount and warp.CanDoubleTap(weapon) then
-        LastAttackTick = TickCount  -- Update the last attack tick
-        CanAttackNow = true         -- Set flag for readiness
-        return true                 -- Ready to attack this tick
-    else
-        CanAttackNow = false
-    end
-    return false
+    -- Execute the warp
+    warp.TriggerWarp()
+
+    -- Reset sv_maxusrcmdprocessticks after warp
+    client.SetConVar("sv_maxusrcmdprocessticks", 24, true)
 end
 
--- Enhanced attack simulation logic
-function SimulateAttack(cmd)
-    if CanAttackNow then
-        if Menu.Misc.InstantAttack then
-            local oppositePoint = pLocal:GetAbsOrigin() - pLocal:EstimateAbsVelocity()
 
-            if tickCounteratack % 2 == 0 then
-                cmd:SetButtons(cmd:GetButtons() | IN_ATTACK)  -- Trigger attack
-            else
-                WalkTo(cmd, pLocal, oppositePoint)  -- Move to opposite point
-                client.RemoveConVarProtection("sv_maxusrcmdprocessticks")
-                client.SetConVar("sv_maxusrcmdprocessticks", 13, true)  -- Set controlled warp ticks
-                warp.TriggerWarp()
-            end
-            tickCounteratack = tickCounteratack + 1
-        else
-            client.RemoveConVarProtection("sv_maxusrcmdprocessticks")
-            client.SetConVar("sv_maxusrcmdprocessticks", 24, true)  -- Set max ticks for normal attack
-            cmd:SetButtons(cmd:GetButtons() | IN_ATTACK)
-        end
-        CanAttackNow = false  -- Reset attack flag
-    end
-end
-
-function AutoWarp(cmd)
+-- Modified AutoWarp to use minWarpTicks from CalculateTrickstab
+local function AutoWarp(cmd)
     local sideMove = cmd:GetSideMove()
     local forwardMove = cmd:GetForwardMove()
 
-    BackstabPos = CalculateTrickstab(cmd)
+    -- Calculate the optimal backstab position based on the current command
+    BackstabPos, bestScore, minWarpTicks = CalculateTrickstab(cmd)
 
-    if BackstabPos ~= emptyVec then
+    -- Ensure we have a valid position for backstab
+    if BackstabPos ~= emptyVec and minWarpTicks then
+        -- Determine movement and warp directions
         local MoveDirection = PositionYaw(pLocalPos, pLocal:EstimateAbsVelocity())
         local WarpDir = PositionYaw(pLocalPos, BackstabPos)
         local canstab = CheckBackstab(BackstabPos)
 
+        -- Movement Assistance: Move towards target if backstab isn't immediately possible
         if Menu.Main.MoveAsistance and not canstab then
             if forwardMove > 0 or sideMove ~= 0 then
-                FakelagOn()  -- Enable fake lag before walking towards the target
-                WalkTo(cmd, pLocalPos, BackstabPos, false)
-                return  -- Skip the warp logic if movement assistance is active
+                FakelagOn()  -- Enable fake lag for smoother movement
+                WalkTo(cmd, pLocalPos, BackstabPos, false)  -- Walk to position without triggering warp
+                return  -- Skip warp logic when using movement assistance
             end
             FakelagOff()
         end
 
+        -- Auto Warp Handling: Conditions for triggering a warp
         if Menu.Advanced.AutoWarp and canstab and not warp.IsWarping() and warp.CanWarp() and warp.GetChargedTicks() >= 23 then
-            -- Set max processing ticks before triggering warp
-            client.RemoveConVarProtection("sv_maxusrcmdprocessticks")
-            client.SetConVar("sv_maxusrcmdprocessticks", 13, true)  -- Set to 13 ticks for a controlled warp
+            -- Calculate the number of ticks needed for the warp (use minimum required)
+            local warpTicks = math.min(warp.GetChargedTicks(), minWarpTicks)
 
-            FakelagOff()  -- Disable fake lag for accurate warp timing
-
-            if Menu.Main.AutoWalk then
-                WalkTo(cmd, pLocalPos, BackstabPos, true)  -- Walk to the backstab position
-
-                -- Check if direction is acceptable for warping
-                local acceptable = CompareYawDirections(MoveDirection, WarpDir, Menu.Advanced.WarpTolerance)
-                if acceptable then
-                    warp.TriggerWarp()
-                end
-            end
-            -- Reset max processing ticks to avoid breaking other mechanics
-            client.SetConVar("sv_maxusrcmdprocessticks", 24, true)
+            -- Perform the controlled warp to the optimal backstab position
+            PerformControlledWarp(cmd, BackstabPos, warpTicks)
         elseif canstab then
-            FakelagOn()  -- Enable fake lag if backstab isn’t viable or warp is unavailable
+            FakelagOn()  -- Enable fake lag if warp is unavailable or backstab not viable yet
         end
     else
-        FakelagOff()  -- Disable fake lag if no action needed
+        FakelagOff()  -- Disable fake lag if no action needed (no valid backstab position)
     end
 end
 
-function OnCreateMove(cmd)
+local Latency = 0
+local lerp = 0
+-- Main function to control the create move process and use AutoWarp and SimulateAttack effectively
+local function OnCreateMove(cmd)
     if not Menu.Main.Active then return end
     CheckMenu()
 
-    -- Calculate latency in seconds
     local latOut = clientstate.GetLatencyOut()
     local latIn = clientstate.GetLatencyIn()
     lerp = (client.GetConVar("cl_interp") + latOut + latIn) or 0
@@ -920,8 +836,8 @@ function OnCreateMove(cmd)
         globalCounter = globalCounter + globals.TickInterval()
         if globalCounter >= (24 + Latency) * globals.TickInterval() or killed then
             warp.TriggerCharge()
-            globalCounter = 0  -- Reset the global counter
-            killed = false  -- Reset the killed flag
+            globalCounter = 0
+            killed = false
         end
     end
 
@@ -940,6 +856,7 @@ function OnCreateMove(cmd)
     end
 end
 
+
 local consolas = draw.CreateFont("Consolas", 17, 500)
 local current_fps = 0
 local function doDraw()
@@ -955,18 +872,18 @@ local function doDraw()
     if Menu.Visuals.Active and TargetPlayer and TargetPlayer.Pos then
         -- Visualize Simulated Positions for each tick
         if Menu.Visuals.VisualizePoints and positions then
-            for _, point in ipairs(positions) do
+            for tick, point in ipairs(positions) do
                 local screenPos = client.WorldToScreen(Vector3(point.x, point.y, point.z))
                 if screenPos then
                     draw.Color(0, 255, 0, 255)  -- Green color for simulated positions
-                    draw.FilledRect(screenPos[1] - 2, screenPos[2] - 2, screenPos[1] + 2, screenPos[2] + 2)
+                    draw.FilledRect(screenPos[1] - 1, screenPos[2] - 1, screenPos[1] + 1, screenPos[2] + 1)
                 end
             end
         end
-
+    
         -- Visualize backstab potential points with different colors
         if Menu.Visuals.VisualizeStabPoint and endwarps then
-            for tick, warpData in pairs(endwarps) do
+            for tick, warpData in ipairs(endwarps) do
                 local pos, isBackstab = warpData[1], warpData[2]
                 local screenPos = client.WorldToScreen(Vector3(pos.x, pos.y, pos.z))
                 
@@ -976,10 +893,11 @@ local function doDraw()
                     else
                         draw.Color(255, 255, 255, 255)  -- White color for non-backstab points
                     end
-                    draw.FilledRect(screenPos[1] - 5, screenPos[2] - 5, screenPos[1] + 5, screenPos[2] + 5)
+                    draw.FilledRect(screenPos[1] - 4, screenPos[2] - 4, screenPos[1] + 4, screenPos[2] + 4)
                 end
             end
         end
+    
 
         -- Visualize Attack Circle around the player
         if Menu.Visuals.Attack_Circle and pLocal then
