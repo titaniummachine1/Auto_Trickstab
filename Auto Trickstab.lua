@@ -523,10 +523,6 @@ local function SimulateDash(simulatedVelocity, ticks)
     local flags = simulationCache.flags
     local lastG = (flags & 1 == 1)  -- Check if initially on the ground
 
-    -- Reset tables for storing positions and backstab states
-    positions = {}  -- Stores all tick positions for visualization
-    endwarps = {}   -- Stores warp data for each tick, including backstab status
-
     -- Track the closest backstab opportunity
     local closestBackstabPos = nil
     local minWarpTicks = ticks + 1  -- Initialize to a high value outside of tick range
@@ -647,72 +643,98 @@ local function get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertic
     return bestcorners
 end
 
-local BACKSTAB_MAX_YAW_DIFF = 90  -- Maximum allowable yaw difference for backstab
+local BACKSTAB_MAX_YAW_DIFF = 180  -- Maximum allowable yaw difference for backstab
 
 local function CalculateTrickstab(cmd)
-    -- Ensure pLocal and TargetPlayer are valid and have position data
     if not TargetPlayer or not TargetPlayer.Pos then
         return emptyVec, nil, nil
     end
 
     local my_pos = pLocalPos
     local enemy_pos = TargetPlayer.Pos
-    local hitbox_size = 49  -- Adjust based on actual hitbox size
-    local vertical_range = 82  -- Adjust based on actual vertical range
+    local hitbox_size = 49
+    local vertical_range = 82
 
-    -- Retrieve movement values from command
-    local sideMove = cmd:GetSideMove() or 0
-    local forwardMove = cmd:GetForwardMove() or 0
-    local intrickstab = forwardMove > 0 and sideMove ~= 0
+    local all_positions = get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range) or {}
 
-    -- Get the best positions (corners or origin) based on the direction to the enemy
-    local best_positions = get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range) or {}
+    -- Calculate yaw differences to determine best direction (left or right)
+    local left_yaw_diff, right_yaw_diff, center_yaw_diff = math.huge, math.huge, math.huge
+    for _, pos in ipairs(all_positions) do
+        local test_yaw = PositionYaw(enemy_pos, enemy_pos + pos)
+        local enemy_yaw = TargetPlayer.viewYaw
+        local yaw_diff = math.abs(NormalizeYaw(test_yaw - enemy_yaw))
 
-    -- Fallback if `best_positions` is empty
-    if #best_positions == 0 then
-        return emptyVec, nil, nil
+        if pos.y > 0 then
+            left_yaw_diff = math.min(left_yaw_diff, yaw_diff)
+        elseif pos.y < 0 then
+            right_yaw_diff = math.min(right_yaw_diff, yaw_diff)
+        elseif pos == center then
+            center_yaw_diff = yaw_diff
+        end
+    end
+
+    -- Determine which side to prioritize based on yaw difference
+    local best_side = (left_yaw_diff < right_yaw_diff) and "left" or "right"
+    local best_positions = {}
+
+    -- Check if we’re behind the enemy (within 180-degree range) and filter positions accordingly
+    if math.min(left_yaw_diff, right_yaw_diff, center_yaw_diff) < 90 then
+        -- If behind enemy, include the optimal side and center
+        for _, pos in ipairs(all_positions) do
+            if ((best_side == "left" and pos.y > 0) or (best_side == "right" and pos.y < 0) or pos == center) then
+                table.insert(best_positions, pos)
+            end
+        end
+    else
+        -- If not behind enemy, include only the optimal side
+        for _, pos in ipairs(all_positions) do
+            if (best_side == "left" and pos.y > 0) or (best_side == "right" and pos.y < 0) then
+                table.insert(best_positions, pos)
+            end
+        end
     end
 
     -- Track the optimal backstab position based on scoring
     local optimalBackstabPos = nil
-    local bestScore = -1  -- Initialize to track the highest score
-    local minWarpTicks = math.huge  -- Initialize to a large number
+    local bestScore = -1
+    local minWarpTicks = math.huge
+    positions = {}
+    endwarps = {}
 
-    -- Iterate through each candidate position
     for _, test_pos in ipairs(best_positions) do
-        -- Simulate the dash to each test position, capturing the potential backstab position and warp ticks
         local final_pos, backstab_pos, warpTicks = SimulateDash(enemy_pos + test_pos - my_pos, warp.GetChargedTicks() or 24)
-        
+
+        -- Store each tick for visualization
+        if final_pos then table.insert(positions, final_pos) end
         if backstab_pos then
-            -- Calculate yaw difference and check if it allows backstab
+            table.insert(endwarps, {backstab_pos, true})
+        else
+            table.insert(endwarps, {final_pos, false})
+        end
+
+        if backstab_pos then
             local spyYaw = PositionYaw(enemy_pos, backstab_pos)
             local enemyYaw = TargetPlayer.viewYaw
             local isWithinBackstabYaw = CheckYawDelta(spyYaw, enemyYaw)
-            
-            -- Only score positions that are within backstab yaw range
+
             if isWithinBackstabYaw then
-                -- Calculate yaw difference component for scoring
                 local yawDiff = math.abs(NormalizeYaw(spyYaw - enemyYaw))
-                local yawComponent = math.max(0, 1 - yawDiff / BACKSTAB_MAX_YAW_DIFF)  -- 1 for perfectly aligned, 0 at the edge
+                local yawComponent = math.max(0, 1 - yawDiff / BACKSTAB_MAX_YAW_DIFF)
 
-                -- Calculate distance component for scoring
                 local distance = (backstab_pos - enemy_pos):Length()
-                local distanceComponent = math.max(0, math.min(1, (120 - distance) / (120 - 48)))  -- 1 for close, 0 at max range
+                local distanceComponent = math.max(0, math.min(1, (120 - distance) / (120 - 48)))
 
-                -- Combine yaw and distance into a single score
-                local score = 0.5 * yawComponent + 0.5 * distanceComponent  -- Equal weight to both components
+                local score = 0.5 * yawComponent + 0.5 * distanceComponent
 
-                -- Update optimal position if this position has the highest score and fewer warp ticks
                 if score > bestScore or (score == bestScore and warpTicks < minWarpTicks) then
                     bestScore = score
                     optimalBackstabPos = backstab_pos
-                    minWarpTicks = warpTicks  -- Set minWarpTicks to the ticks needed for this best position
+                    minWarpTicks = warpTicks
                 end
             end
         end
     end
 
-    -- Return the optimal backstab position, best score, and minimum warp ticks needed
     return optimalBackstabPos or emptyVec, bestScore, minWarpTicks
 end
 
@@ -806,7 +828,7 @@ local function AutoWarp(cmd)
         end
 
         -- Auto Warp Handling: Conditions for triggering a warp
-        if Menu.Advanced.AutoWarp and canstab and not warp.IsWarping() and warp.CanWarp() and warp.GetChargedTicks() >= 23 then
+        if Menu.Main.AutoWarp and canstab and not warp.IsWarping() and warp.CanWarp() and warp.GetChargedTicks() >= 23 then
             -- Calculate the number of ticks needed for the warp (use minimum required)
             local warpTicks = math.min(warp.GetChargedTicks(), minWarpTicks)
 
@@ -826,6 +848,10 @@ local lerp = 0
 local function OnCreateMove(cmd)
     if not Menu.Main.Active then return end
     CheckMenu()
+
+    -- Reset tables for storing positions and backstab states
+    positions = {}  -- Stores all tick positions for visualization
+    endwarps = {}   -- Stores warp data for each tick, including backstab status
 
     local latOut = clientstate.GetLatencyOut()
     local latIn = clientstate.GetLatencyIn()
@@ -880,20 +906,22 @@ local function doDraw()
                 end
             end
         end
-    
+
         -- Visualize backstab potential points with different colors
         if Menu.Visuals.VisualizeStabPoint and endwarps then
             for tick, warpData in ipairs(endwarps) do
                 local pos, isBackstab = warpData[1], warpData[2]
                 local screenPos = client.WorldToScreen(Vector3(pos.x, pos.y, pos.z))
-                
+
                 if screenPos then
                     if isBackstab then
                         draw.Color(255, 0, 0, 255)  -- Red color for backstab points
+                        draw.FilledRect(screenPos[1] - 4, screenPos[2] - 4, screenPos[1] + 4, screenPos[2] + 4)
                     else
                         draw.Color(255, 255, 255, 255)  -- White color for non-backstab points
+                        draw.FilledRect(screenPos[1] - 2, screenPos[2] - 2, screenPos[1] + 2, screenPos[2] + 2)
                     end
-                    draw.FilledRect(screenPos[1] - 4, screenPos[2] - 4, screenPos[1] + 4, screenPos[2] + 4)
+                    
                 end
             end
         end
