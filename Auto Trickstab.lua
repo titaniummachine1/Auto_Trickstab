@@ -427,15 +427,23 @@ local function WalkInDirection(cmd, direction)
 		local forwardMove = cmd:GetForwardMove()
 		local sideMove = cmd:GetSideMove()
 
-		-- Calculate what direction this input represents (relative to view)
-		local inputAngle = math.atan(sideMove, forwardMove) -- Radians
+		-- Calculate desired world direction (radians)
+		local targetYaw = math.atan(dy, dx)
 
-		-- Calculate desired world direction
-		local targetYaw = math.atan(dy, dx) -- Radians
+		-- If player has input, calculate angle relative to view forward
+		-- Otherwise assume walking forward
+		local inputAngle = 0
+		if math.abs(forwardMove) > 0.1 or math.abs(sideMove) > 0.1 then
+			-- TF2: sideMove is NEGATIVE for right, POSITIVE for left
+			-- atan2(y, x) gives angle from x-axis (forward)
+			-- Negate sideMove to get correct angle direction
+			inputAngle = math.atan(-sideMove, forwardMove)
+		end
 
 		-- Calculate what view angle makes the input go in target direction
-		-- viewYaw + inputAngle = targetYaw
-		-- viewYaw = targetYaw - inputAngle
+		-- Current movement direction = viewYaw + inputAngle
+		-- We want: viewYaw + inputAngle = targetYaw
+		-- So: viewYaw = targetYaw - inputAngle
 		local desiredViewYaw = targetYaw - inputAngle
 
 		-- Convert to degrees and normalize to -180 to 180
