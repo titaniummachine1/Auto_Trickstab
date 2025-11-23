@@ -1381,7 +1381,7 @@ local function AutoWarp(cmd)
 
 	-- PRIORITY 0: Movement Assistance - Works ALWAYS (even without backstab position)
 	-- Helps get into position by walking to optimal side
-	if Menu.Main.MoveAsistance then
+	if Menu.Main.MoveAsistance and TargetPlayer and TargetPlayer.Pos then
 		local canCurrentlyBackstab = CheckBackstab(pLocalPos)
 		if not canCurrentlyBackstab then
 			-- Use bestDirection from simulation if available, otherwise walk toward enemy
