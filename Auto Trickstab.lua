@@ -80,6 +80,7 @@ local vHitbox = { Min = Vector3(-23.99, -23.99, 0), Max = Vector3(23.99, 23.99, 
 
 local TargetPlayer = {}
 local endwarps = {}
+local debugCornerData = {} -- Debug info for corner visualization
 
 -- Constants
 local BACKSTAB_RANGE = 66 -- Hammer units
@@ -410,13 +411,19 @@ local DEG_TO_RAD = math.pi / 180
 
 -- Walk in a specific direction relative to view angles
 -- Two methods: angle snapping (works now) or smooth rotation (needs lbox fix)
-local function WalkInDirection(cmd, direction)
+-- forceNoSnap: force disable angle snap (for MoveAsistance without stab points)
+local function WalkInDirection(cmd, direction, forceNoSnap)
 	local dx, dy = direction.x, direction.y
 
-	-- Default to angle snap if not set
+	-- Default to angle snap if not set (unless forced off)
 	local useAngleSnap = Menu.Advanced.UseAngleSnap
 	if useAngleSnap == nil then
 		useAngleSnap = true
+	end
+
+	-- Disable snap if forced (e.g., MoveAsistance without stab points)
+	if forceNoSnap then
+		useAngleSnap = false
 	end
 
 	if useAngleSnap then
@@ -678,6 +685,11 @@ local function IsInRange(targetPos, spherePos, sphereRadius)
 end
 
 local function CheckBackstab(testPoint)
+	-- Safety check: ensure TargetPlayer exists
+	if not TargetPlayer or not TargetPlayer.viewpos or not TargetPlayer.Back or not TargetPlayer.Pos then
+		return false
+	end
+
 	local viewPos = testPoint + pLocalViewOffset -- Adjust for viewpoint
 	local enemyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, TargetPlayer.viewpos + TargetPlayer.Back)) --back direction
 	local spyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, viewPos)) --spy direction
@@ -929,7 +941,7 @@ local direction_to_corners = {
 		[1] = { center, corners[3], corners[2] }, -- FRONT: bottom corners (y=-49) - FIXED
 	},
 	[1] = {
-		[-1] = { center, corners[3], corners[2] }, -- Top-right to bottom-left (corrected)
+		[-1] = { center, corners[2], corners[3] }, -- Top-right to bottom-left (corrected)
 		[0] = { center, corners[3], corners[1] }, -- Right
 		[1] = { center, corners[4], corners[1] }, -- Bottom-right
 	},
@@ -1094,16 +1106,67 @@ local function CalculateTrickstab(cmd)
 	local best_side = (left_yaw_diff < right_yaw_diff) and "left" or "right"
 	local best_positions = {}
 
-	-- Find optimal side position
+	-- Find optimal side position - pick the one with SMALLEST yaw delta
 	local optimalSidePos = nil
-	for _, pos in ipairs(all_positions) do
+	local optimalSideIndex = 0
+	local bestYawDelta = math.huge
+
+	for i, pos in ipairs(all_positions) do
 		if pos ~= center then
+			-- Check if this corner is on the best side
 			if (best_side == "left" and pos.y < 0) or (best_side == "right" and pos.y > 0) then
-				optimalSidePos = pos
-				break
+				-- Calculate yaw delta for this specific corner
+				local test_yaw = PositionYaw(enemy_pos, enemy_pos + pos)
+				local enemy_yaw = TargetPlayer.viewYaw
+				local yaw_diff = math.abs(NormalizeYaw(test_yaw - enemy_yaw))
+
+				-- Pick corner with smallest yaw delta (closest to enemy back)
+				if yaw_diff < bestYawDelta then
+					bestYawDelta = yaw_diff
+					optimalSidePos = pos
+					optimalSideIndex = i
+				end
 			end
 		end
 	end
+
+	-- Classify each corner by direction for debug
+	local cornerDirections = {}
+	for i, pos in ipairs(all_positions) do
+		if pos == center then
+			cornerDirections[i] = "CENTER"
+		elseif pos.y > 0 then
+			cornerDirections[i] = "RIGHT"
+		elseif pos.y < 0 then
+			cornerDirections[i] = "LEFT"
+		else
+			cornerDirections[i] = "UNKNOWN"
+		end
+	end
+
+	-- Calculate player's direction indices relative to enemy (-1, 0, 1)
+	local dx = enemy_pos.x - my_pos.x
+	local dy = enemy_pos.y - my_pos.y
+	local dz = enemy_pos.z - my_pos.z
+	local buffor = 5
+
+	local out_of_vertical_range = (math.abs(dz) > vertical_range) and 1 or 0
+	local direction_x = ((dx > hitbox_size - buffor) and 1 or 0) - ((dx < -hitbox_size + buffor) and 1 or 0)
+	local direction_y = ((dy > hitbox_size - buffor) and 1 or 0) - ((dy < -hitbox_size + buffor) and 1 or 0)
+
+	-- Store for debug visualization
+	debugCornerData = {
+		corners = dynamicCorners,
+		allPositions = all_positions,
+		cornerDirections = cornerDirections,
+		optimalIndex = optimalSideIndex,
+		bestSide = best_side,
+		leftYaw = left_yaw_diff,
+		rightYaw = right_yaw_diff,
+		playerDirX = direction_x, -- -1, 0, or 1
+		playerDirY = direction_y, -- -1, 0, or 1
+		outOfVertRange = out_of_vertical_range,
+	}
 
 	-- Fallback if no optimal side found
 	if not optimalSidePos then
@@ -1323,8 +1386,14 @@ local function AutoWarp(cmd)
 		if not canCurrentlyBackstab then
 			-- Use bestDirection from simulation if available, otherwise walk toward enemy
 			local dir = bestDirection or (TargetPlayer.Pos - pLocalPos)
+
+			-- Check if we have backstab points - if not, disable angle snap (less disruptive)
+			local backstabPointCount = totalBackstabPoints or 0
+			local hasStabPoints = backstabPointCount > 0
+			local forceNoSnap = not hasStabPoints -- Disable snap when just getting into position
+
 			FakelagOn()
-			WalkInDirection(cmd, dir)
+			WalkInDirection(cmd, dir, forceNoSnap)
 		end
 	end
 
@@ -1396,11 +1465,17 @@ local lerp = 0
 -- Main function to control the create move process and use AutoWarp and SimulateAttack effectively
 local function OnCreateMove(cmd)
 	if not Menu.Main.Active then
+		-- Clear visuals when script is inactive
+		positions = {}
+		endwarps = {}
 		return
 	end
 
 	-- Check activation mode (Always, On Hold, On Release, Toggle, On Click)
 	if not ShouldActivateTrickstab() then
+		-- Clear visuals when key not held
+		positions = {}
+		endwarps = {}
 		return
 	end
 
@@ -1493,30 +1568,102 @@ local function doDraw()
 	end
 
 	if Menu.Visuals.Active and TargetPlayer and TargetPlayer.Pos then
-		-- DEBUG: Draw corner indices 1-4 at enemy position
-		local enemy_pos = TargetPlayer.Pos
-		for i = 1, 4 do
-			local cornerPos = enemy_pos + corners[i]
-			local screenPos = client.WorldToScreen(cornerPos)
-			if screenPos then
-				-- Draw corner index number
-				draw.SetFont(consolas)
-				draw.Color(255, 255, 0, 255) -- Yellow
-				draw.Text(math.floor(screenPos[1]), math.floor(screenPos[2]), tostring(i))
+		-- DEBUG: Draw corner selection visualization (only if debug enabled)
+		if Menu.Visuals.DebugCorners and debugCornerData and debugCornerData.allPositions then
+			local enemy_pos = TargetPlayer.Pos
+			for i, pos in ipairs(debugCornerData.allPositions) do
+				local cornerPos = enemy_pos + pos
+				local screenPos = client.WorldToScreen(cornerPos)
+				if screenPos then
+					local direction = debugCornerData.cornerDirections[i] or "?"
 
-				-- Draw small circle at corner
-				draw.Color(255, 255, 0, 200)
-				local sx, sy = math.floor(screenPos[1]), math.floor(screenPos[2])
-				draw.FilledRect(sx - 2, sy - 2, sx + 2, sy + 2)
+					-- Color by direction
+					if i == debugCornerData.optimalIndex then
+						draw.Color(0, 255, 0, 255) -- Green for optimal
+					elseif direction == "LEFT" then
+						draw.Color(100, 150, 255, 200) -- Blue for left
+					elseif direction == "RIGHT" then
+						draw.Color(255, 150, 100, 200) -- Orange for right
+					elseif direction == "CENTER" then
+						draw.Color(255, 255, 0, 200) -- Yellow for center
+					else
+						draw.Color(255, 255, 255, 150) -- White for unknown
+					end
+
+					-- Draw corner marker (larger)
+					local sx, sy = math.floor(screenPos[1]), math.floor(screenPos[2])
+					draw.FilledRect(sx - 5, sy - 5, sx + 5, sy + 5)
+
+					-- Draw corner index and direction with background for visibility
+					draw.SetFont(consolas)
+
+					-- Index number in large text
+					draw.Color(0, 0, 0, 200) -- Black background
+					draw.FilledRect(sx + 8, sy - 15, sx + 35, sy + 5)
+					draw.Color(255, 255, 255, 255) -- White text
+					draw.Text(sx + 10, sy - 12, "IDX:" .. tostring(i))
+
+					-- Direction label
+					draw.Color(0, 0, 0, 200) -- Black background
+					draw.FilledRect(sx + 8, sy + 5, sx + 65, sy + 20)
+
+					-- Color text by direction for clarity
+					if direction == "LEFT" then
+						draw.Color(100, 150, 255, 255)
+					elseif direction == "RIGHT" then
+						draw.Color(255, 150, 100, 255)
+					elseif direction == "CENTER" then
+						draw.Color(255, 255, 0, 255)
+					else
+						draw.Color(255, 255, 255, 255)
+					end
+					draw.Text(sx + 10, sy + 8, direction)
+
+					-- Show X,Y coordinates for debugging direction mapping
+					draw.Color(0, 0, 0, 200) -- Black background
+					draw.FilledRect(sx + 8, sy + 22, sx + 90, sy + 37)
+					draw.Color(255, 255, 255, 255) -- White text
+					draw.Text(sx + 10, sy + 25, string.format("X:%.0f Y:%.0f", pos.x, pos.y))
+				end
 			end
+
+			-- Draw best side and player direction text
+			draw.SetFont(consolas)
+			draw.Color(255, 255, 0, 255)
+			draw.Text(
+				10,
+				150,
+				string.format(
+					"Best Side: %s (L:%.1f R:%.1f)",
+					debugCornerData.bestSide,
+					debugCornerData.leftYaw,
+					debugCornerData.rightYaw
+				)
+			)
+
+			-- Draw player direction indices relative to enemy
+			draw.Color(0, 255, 255, 255) -- Cyan
+			draw.Text(
+				10,
+				165,
+				string.format(
+					"Player Dir: [%d, %d] (VertRange: %d)",
+					debugCornerData.playerDirX or 0,
+					debugCornerData.playerDirY or 0,
+					debugCornerData.outOfVertRange or 0
+				)
+			)
 		end
 
-		-- Draw center point (index 0)
-		local centerPos = client.WorldToScreen(enemy_pos)
-		if centerPos then
-			draw.SetFont(consolas)
-			draw.Color(255, 0, 255, 255) -- Magenta for center
-			draw.Text(math.floor(centerPos[1]), math.floor(centerPos[2]), "C")
+		-- Draw red square around final backstab position
+		if BackstabPos and BackstabPos ~= emptyVec then
+			local screenPos = client.WorldToScreen(BackstabPos)
+			if screenPos then
+				local sx, sy = math.floor(screenPos[1]), math.floor(screenPos[2])
+				draw.Color(255, 0, 0, 255) -- Red
+				draw.OutlinedRect(sx - 8, sy - 8, sx + 8, sy + 8)
+				draw.OutlinedRect(sx - 9, sy - 9, sx + 9, sy + 9) -- Thicker outline
+			end
 		end
 
 		-- Visualize ALL Warp Simulation Paths with gradient lines
@@ -1773,6 +1920,10 @@ local function doDraw()
 			Menu.Visuals.Attack_Circle = TimMenu.Checkbox("Attack Circle", Menu.Visuals.Attack_Circle)
 			TimMenu.NextLine()
 			Menu.Visuals.BackLine = TimMenu.Checkbox("Forward Line", Menu.Visuals.BackLine)
+			TimMenu.NextLine()
+
+			-- Debug option for corner visualization
+			Menu.Visuals.DebugCorners = TimMenu.Checkbox("Debug Corners", Menu.Visuals.DebugCorners or false)
 			TimMenu.NextLine()
 		end
 	end
