@@ -597,10 +597,10 @@ local function UpdateTarget()
 					goto continue
 				end
 
-				-- Dynamic hitbox sizing based on ducking state
-				local vpFlags = player:GetPropInt("m_fFlags")
-				local isDucking = (vpFlags & FL_DUCKING) ~= 0
-				local hitboxHeight = isDucking and 62 or 82
+				-- Get hitbox directly from entity - handles ducking, etc. automatically
+				local mins, maxs = player:GetMins(), player:GetMaxs()
+				local hitboxRadius = maxs.x -- Horizontal radius (x and y are same)
+				local hitboxHeight = maxs.z -- Vertical height
 
 				bestTargetDetails = {
 					entity = player,
@@ -609,7 +609,10 @@ local function UpdateTarget()
 					viewpos = playerPos + viewoffset,
 					viewYaw = viewYaw, -- Include yaw for backstab calculations
 					Back = -EulerAngles(viewAngles:Unpack()):Forward(), -- Ensure Back is accurate
-					hitboxHeight = hitboxHeight, -- Store dynamic hitbox height
+					hitboxRadius = hitboxRadius, -- Real-time hitbox radius from game
+					hitboxHeight = hitboxHeight, -- Real-time hitbox height from game
+					mins = mins, -- Store full mins for reference
+					maxs = maxs, -- Store full maxs for reference
 				}
 			end
 
@@ -900,11 +903,16 @@ local function SimulateDash(targetDirection, ticks)
 	return lastP, minWarpTicks, simPositions, simEndwarps
 end
 
+-- Corners must account for BOTH player and enemy hitbox radius
+-- Player hitbox (24) + Enemy hitbox (24) = 48 units needed for clearance
+local PLAYER_HITBOX_RADIUS = 24
+local ENEMY_HITBOX_RADIUS = 24
+local CORNER_DISTANCE = PLAYER_HITBOX_RADIUS + ENEMY_HITBOX_RADIUS -- 48 units total
 local corners = {
-	Vector3(-49.0, 49.0, 0.0), -- top left corner
-	Vector3(49.0, 49.0, 0.0), -- top right corner
-	Vector3(-49.0, -49.0, 0.0), -- bottom left corner
-	Vector3(49.0, -49.0, 0.0), -- bottom right corner
+	Vector3(-CORNER_DISTANCE, CORNER_DISTANCE, 0.0), -- top left corner
+	Vector3(CORNER_DISTANCE, CORNER_DISTANCE, 0.0), -- top right corner
+	Vector3(-CORNER_DISTANCE, -CORNER_DISTANCE, 0.0), -- bottom left corner
+	Vector3(CORNER_DISTANCE, -CORNER_DISTANCE, 0.0), -- bottom right corner
 }
 
 local center = Vector3(0, 0, 0)
@@ -1031,14 +1039,35 @@ local function CalculateTrickstab(cmd)
 
 	local my_pos = pLocalPos
 	local enemy_pos = TargetPlayer.Pos
-	local hitbox_size = 49
-	local vertical_range = 82
+
+	-- Calculate corner distance: player radius + enemy radius + 1 unit buffer
+	local myMins, myMaxs = pLocal:GetMins(), pLocal:GetMaxs()
+	local myRadius = myMaxs.x -- Player's horizontal collision radius
+	local enemyRadius = TargetPlayer.hitboxRadius or 24
+	local cornerDistance = myRadius + enemyRadius + 1 -- Add 1 unit buffer
+
+	-- Generate corners dynamically based on calculated distance
+	local dynamicCorners = {
+		Vector3(-cornerDistance, cornerDistance, 0.0), -- top left
+		Vector3(cornerDistance, cornerDistance, 0.0), -- top right
+		Vector3(-cornerDistance, -cornerDistance, 0.0), -- bottom left
+		Vector3(cornerDistance, -cornerDistance, 0.0), -- bottom right
+	}
+
+	-- Use enemy hitbox for direction detection
+	local hitbox_size = enemyRadius
+	local vertical_range = TargetPlayer.hitboxHeight or 82
 	local playerClass = pLocal:GetPropInt("m_iClass")
 	local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
 	local currentVel = pLocal:EstimateAbsVelocity()
 	local warpTicks = warp.GetChargedTicks() or 24
 
-	local all_positions = get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range) or {}
+	-- Use dynamic corners for position calculation
+	local all_positions = {}
+	for _, corner in ipairs(dynamicCorners) do
+		all_positions[#all_positions + 1] = corner
+	end
+	all_positions[#all_positions + 1] = center -- Add center position
 
 	-- Calculate yaw differences to determine best direction (left or right)
 	-- pos.y > 0 = positive Y axis, pos.y < 0 = negative Y axis
@@ -1461,6 +1490,32 @@ local function doDraw()
 	end
 
 	if Menu.Visuals.Active and TargetPlayer and TargetPlayer.Pos then
+		-- DEBUG: Draw corner indices 1-4 at enemy position
+		local enemy_pos = TargetPlayer.Pos
+		for i = 1, 4 do
+			local cornerPos = enemy_pos + corners[i]
+			local screenPos = client.WorldToScreen(cornerPos)
+			if screenPos then
+				-- Draw corner index number
+				draw.SetFont(consolas)
+				draw.Color(255, 255, 0, 255) -- Yellow
+				draw.Text(math.floor(screenPos[1]), math.floor(screenPos[2]), tostring(i))
+
+				-- Draw small circle at corner
+				draw.Color(255, 255, 0, 200)
+				local sx, sy = math.floor(screenPos[1]), math.floor(screenPos[2])
+				draw.FilledRect(sx - 2, sy - 2, sx + 2, sy + 2)
+			end
+		end
+
+		-- Draw center point (index 0)
+		local centerPos = client.WorldToScreen(enemy_pos)
+		if centerPos then
+			draw.SetFont(consolas)
+			draw.Color(255, 0, 255, 255) -- Magenta for center
+			draw.Text(math.floor(centerPos[1]), math.floor(centerPos[2]), "C")
+		end
+
 		-- Visualize ALL Warp Simulation Paths with gradient lines
 		-- Each path is drawn SEPARATELY to avoid connecting them
 		if Menu.Visuals.VisualizePoints and positions then
