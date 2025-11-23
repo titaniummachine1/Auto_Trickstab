@@ -54,9 +54,9 @@ local Menu = { -- this is the config that will be loaded every time u load the s
 	},
 
 	Advanced = {
-		BackstabRange = 70, -- Backstab range in hammer units
-		MinBackstabPoints = 3, -- Minimum number of backstab points in simulation before allowing warp (slider: 1-30)
-		MaxBackstabTime = 13, -- Maximum time (in ticks) to attempt backstab
+		BackstabRange = 66, -- Backstab range in hammer units
+		MinBackstabPoints = 4, -- Minimum number of backstab points in simulation before allowing warp (slider: 1-30)
+		MaxBackstabTime = 14, -- Maximum time (in ticks) to attempt backstab
 		UseAngleSnap = true, -- Use angle snapping for movement (disable for smooth rotation - needs lbox fix)
 	},
 
@@ -420,28 +420,42 @@ local function WalkInDirection(cmd, direction)
 	end
 
 	if useAngleSnap then
-		-- METHOD 1: Rotate view to absolute target yaw (WORKING NOW)
-		-- Calculate absolute yaw angle to walk direction (not relative!)
-		local targetYaw = math.atan(dy, dx) * (180 / math.pi)
+		-- METHOD 1: Angle snap - Account for player's current input and rotate view
+		-- So that their input direction results in the optimal walk direction
 
-		-- Normalize to -180 to 180 to prevent wild spinning
-		targetYaw = targetYaw % 360
-		if targetYaw > 180 then
-			targetYaw = targetYaw - 360
-		elseif targetYaw < -180 then
-			targetYaw = targetYaw + 360
+		-- Get player's current input (may be forward, backward, diagonal, etc)
+		local forwardMove = cmd:GetForwardMove()
+		local sideMove = cmd:GetSideMove()
+
+		-- Calculate what direction this input represents (relative to view)
+		local inputAngle = math.atan(sideMove, forwardMove) -- Radians
+
+		-- Calculate desired world direction
+		local targetYaw = math.atan(dy, dx) -- Radians
+
+		-- Calculate what view angle makes the input go in target direction
+		-- viewYaw + inputAngle = targetYaw
+		-- viewYaw = targetYaw - inputAngle
+		local desiredViewYaw = targetYaw - inputAngle
+
+		-- Convert to degrees and normalize to -180 to 180
+		desiredViewYaw = desiredViewYaw * (180 / math.pi)
+		desiredViewYaw = desiredViewYaw % 360
+		if desiredViewYaw > 180 then
+			desiredViewYaw = desiredViewYaw - 360
+		elseif desiredViewYaw < -180 then
+			desiredViewYaw = desiredViewYaw + 360
 		end
 
-		-- Get current view angles (local)
+		-- Get current view angles
 		local viewAngles = engine.GetViewAngles()
 
-		-- Set absolute yaw (not adding to current!)
-		local newAngles = EulerAngles(viewAngles.x, targetYaw, 0)
+		-- Set absolute yaw that makes player input go in optimal direction
+		local newAngles = EulerAngles(viewAngles.x, desiredViewYaw, 0)
 		engine.SetViewAngles(newAngles)
 
-		-- Walk forward (warp locks this)
-		cmd:SetForwardMove(MAX_CMD_SPEED)
-		cmd:SetSideMove(0)
+		-- Keep player's input unchanged (they might be walking backward/diagonal)
+		-- The view rotation will make their input go in the right direction!
 	else
 		-- METHOD 2: Smooth rotation without angle snap (NEEDS LBOX FIX)
 		-- Calculate target yaw from direction vector
