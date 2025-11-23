@@ -1040,13 +1040,16 @@ local function CalculateTrickstab(cmd)
 	local my_pos = pLocalPos
 	local enemy_pos = TargetPlayer.Pos
 
-	-- Calculate corner distance: player radius + enemy radius + 1 unit buffer
+	-- Get actual collision hulls from game (used in simulation)
 	local myMins, myMaxs = pLocal:GetMins(), pLocal:GetMaxs()
-	local myRadius = myMaxs.x -- Player's horizontal collision radius
+	local myRadius = myMaxs.x -- Player's actual collision radius
+	local enemyMins = TargetPlayer.mins or Vector3(-24, -24, 0)
+	local enemyMaxs = TargetPlayer.maxs or Vector3(24, 24, 82)
 	local enemyRadius = TargetPlayer.hitboxRadius or 24
-	local cornerDistance = myRadius + enemyRadius + 1 -- Add 1 unit buffer
 
-	-- Generate corners dynamically based on calculated distance
+	-- Corner positions: player radius + enemy radius + 1 unit buffer
+	-- Buffer ONLY for target point selection, NOT for simulation collision
+	local cornerDistance = myRadius + enemyRadius + 1
 	local dynamicCorners = {
 		Vector3(-cornerDistance, cornerDistance, 0.0), -- top left
 		Vector3(cornerDistance, cornerDistance, 0.0), -- top right
@@ -1054,9 +1057,9 @@ local function CalculateTrickstab(cmd)
 		Vector3(cornerDistance, -cornerDistance, 0.0), -- bottom right
 	}
 
-	-- Use enemy hitbox for direction detection
-	local hitbox_size = enemyRadius
-	local vertical_range = TargetPlayer.hitboxHeight or 82
+	-- Simulation uses REAL hitboxes (no buffer)
+	local hitbox_size = enemyRadius -- For direction detection
+	local vertical_range = TargetPlayer.hitboxHeight or 82 -- For vertical checks
 	local playerClass = pLocal:GetPropInt("m_iClass")
 	local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
 	local currentVel = pLocal:EstimateAbsVelocity()
