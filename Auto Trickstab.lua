@@ -58,6 +58,10 @@ local Menu = { -- this is the config that will be loaded every time u load the s
 		MinBackstabPoints = 4, -- Minimum number of backstab points in simulation before allowing warp (slider: 1-30)
 		MaxBackstabTime = 14, -- Maximum time (in ticks) to attempt backstab
 		UseAngleSnap = true, -- Use angle snapping for movement (disable for smooth rotation - needs lbox fix)
+		ColisionCheck = true, -- Enable collision checking with map geometry (stairs, walls, etc.)
+		AdvancedPred = true, -- Enable advanced trace validation for range checks
+		ManualDirection = false, -- Manual movement direction control
+		AutoRecharge = true, -- Auto recharge warp after kill/hurt
 	},
 
 	Visuals = {
@@ -659,8 +663,10 @@ local function IsInRange(targetPos, spherePos, sphereRadius)
 
 	-- Check if the target is within the sphere radius squared
 	if sphereRadius * sphereRadius > distanceSquared then
-		-- Calculate the direction from spherePos to closestPoint
-		local direction = Normalize(closestPoint - spherePos)
+		-- Calculate the direction from spherePos to closestPoint (safe normalize)
+		local dirVec = closestPoint - spherePos
+		local dirLen = dirVec:Length()
+		local direction = (dirLen > 0) and (dirVec / dirLen) or Vector3(1, 0, 0) -- Default forward if overlapping
 		local SwingtraceEnd = spherePos + direction * sphereRadius
 
 		if Menu.Advanced.AdvancedPred then
@@ -746,36 +752,87 @@ local function handleGroundCollision(vel, groundTrace, vUp)
 	return groundTrace.endpos, onGround
 end
 
--- Cache structure
+-- Cache structure (TF2 defaults: gravity=800, stepSize=18)
 local simulationCache = {
 	tickInterval = globals.TickInterval(),
-	gravity = SV_GRAVITY, -- Use cached ConVar
-	stepSize = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize") or 0,
+	gravity = SV_GRAVITY or 800, -- Use cached ConVar with fallback
+	stepSize = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize") or 18,
 	flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0,
 }
 
 -- Function to update cache (call this when game environment changes)
 local function UpdateSimulationCache()
 	simulationCache.tickInterval = globals.TickInterval()
-	simulationCache.gravity = SV_GRAVITY -- Use cached ConVar
-	simulationCache.stepSize = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize") or 0
+	simulationCache.gravity = SV_GRAVITY or 800 -- Use cached ConVar with fallback
+	local step = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize")
+	simulationCache.stepSize = (step and step > 0) and step or 18 -- TF2 default step size
 	simulationCache.flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
 end
 
 local ignoreEntities = { "CTFAmmoPack", "CTFDroppedWeapon" }
 local function shouldHitEntityFun(entity, player)
-	for _, ignoreEntity in ipairs(ignoreEntities) do --ignore custom
-		if entity:GetClass() == ignoreEntity then
-			return false
+	-- Safety: check entity is valid
+	if not entity then
+		return false
+	end
+
+	-- Ignore specific entity classes
+	local ok, entClass = pcall(function()
+		return entity:GetClass()
+	end)
+	if ok and entClass then
+		for _, ignoreEntity in ipairs(ignoreEntities) do
+			if entClass == ignoreEntity then
+				return false
+			end
 		end
 	end
 
-	if entity:GetName() == player:GetName() then
-		return false
-	end --ignore self
-	if entity:GetTeamNumber() == player:GetTeamNumber() then
-		return false
-	end --ignore teammates
+	-- Check if entity is at a solid world position (stairs, ramps, brushes)
+	-- This is the key fix from Swing Prediction!
+	local ok2, pos = pcall(function()
+		return entity:GetAbsOrigin()
+	end)
+	if ok2 and pos then
+		pos = pos + Vector3(0, 0, 1)
+		local contents = engine.GetPointContents(pos)
+		if contents ~= 0 then
+			return true -- This is world geometry, hit it
+		end
+	end
+
+	-- Check if entity is a player
+	local ok5, isPlayer = pcall(function()
+		return entity:IsPlayer()
+	end)
+
+	if ok5 and isPlayer then
+		-- Ignore self
+		local ok3, entName = pcall(function()
+			return entity:GetName()
+		end)
+		local ok4, playerName = pcall(function()
+			return player:GetName()
+		end)
+		if ok3 and ok4 and entName == playerName then
+			return false -- Don't collide with ourselves
+		end
+
+		-- Ignore teammates (same team as us)
+		local ok6, entTeam = pcall(function()
+			return entity:GetTeamNumber()
+		end)
+		local ok7, playerTeam = pcall(function()
+			return player:GetTeamNumber()
+		end)
+		if ok6 and ok7 and entTeam == playerTeam then
+			return false -- Don't collide with teammates
+		end
+
+		-- HIT enemy players (we need to collide with target!)
+		return true
+	end
+
 	return true
 end
 
@@ -795,10 +852,14 @@ local function SimulateDash(targetDirection, ticks)
 	local vel = Vector3(currentVel.x, currentVel.y, currentVel.z)
 
 	-- Set gravity and step size from cached values
-	local gravity = simulationCache.gravity * tick_interval
+	local gravity = (simulationCache.gravity or 800) * tick_interval
 	local stepSize = simulationCache.stepSize
+	-- Ensure stepSize is at least 18 (TF2 default) - handles both nil and 0
+	if not stepSize or stepSize <= 0 then
+		stepSize = 18
+	end
 	local vUp = Vector3(0, 0, 1)
-	local vStep = Vector3(0, 0, stepSize or 18)
+	local vStep = Vector3(0, 0, stepSize)
 
 	-- Helper to determine if an entity should be hit
 	local shouldHitEntity = function(entity)
@@ -931,19 +992,19 @@ local center = Vector3(0, 0, 0)
 
 local direction_to_corners = {
 	[-1] = {
-		[-1] = { center, corners[1], corners[4] }, -- Top-left
-		[0] = { center, corners[2], corners[4] }, -- Left
-		[1] = { center, corners[2], corners[3] }, -- Top-left to bottom-right (corrected)
+		[-1] = { center, corners[4], corners[1] }, -- Top-left
+		[0] = { center, corners[4], corners[2] }, -- Left
+		[1] = { center, corners[3], corners[2] }, -- Top-left to bottom-right (corrected)
 	},
 	[0] = {
-		[-1] = { center, corners[1], corners[2] }, -- BACK: top corners (y=49)
+		[-1] = { center, corners[2], corners[1] }, -- BACK: top corners (y=49)
 		[0] = { center }, -- Center
-		[1] = { center, corners[3], corners[2] }, -- FRONT: bottom corners (y=-49) - FIXED
+		[1] = { center, corners[3], corners[4] }, -- FRONT: bottom corners (y=-49) - FIXED
 	},
 	[1] = {
 		[-1] = { center, corners[2], corners[3] }, -- Top-right to bottom-left (corrected)
-		[0] = { center, corners[3], corners[1] }, -- Right
-		[1] = { center, corners[4], corners[1] }, -- Bottom-right
+		[0] = { center, corners[1], corners[3] }, -- Right
+		[1] = { center, corners[1], corners[4] }, -- Bottom-right
 	},
 }
 
@@ -988,10 +1049,20 @@ local function CalculateOptimalWishdir(
 	vertical_range
 )
 	local tick_interval = globals.TickInterval()
+
+	-- STEP 1: Get direction from START position to target
+	-- Then extend target 450 units further so we don't stop at corner
+	local baseTarget = enemyPos + offsetFromEnemy
+	local dirFromStart = baseTarget - startPos
+	local dirFromStartNorm = Normalize(dirFromStart)
+
+	-- Extended target: 450 units past the corner in same direction
+	local extendedTarget = baseTarget + dirFromStartNorm * 450
+
+	-- STEP 2: Simulate coasting WITHOUT input
 	local pos = Vector3(startPos.x, startPos.y, startPos.z)
 	local vel = Vector3(startVel.x, startVel.y, startVel.z)
 
-	-- Simulate coasting WITHOUT input (viewangle frozen, no wishdir applied)
 	for i = 1, ticks do
 		-- Just move with current velocity (no acceleration)
 		pos = pos + vel * tick_interval
@@ -1007,41 +1078,12 @@ local function CalculateOptimalWishdir(
 		end
 	end
 
-	-- CRITICAL: Recalculate best position FROM coasted position
-	-- If we coasted past target, we need a NEW best position, not the old one
-	local coastedPositions = get_best_corners_or_origin(pos, enemyPos, hitbox_size, vertical_range) or {}
+	-- STEP 3: Direction from coasted position to EXTENDED target
+	-- This ensures we keep full speed toward/past the corner
+	local directionToTarget = extendedTarget - pos
 
-	-- Find the corner/position that matches our intended offset direction
-	-- (keep same strategy: optimal side or center)
-	local newBestOffset = offsetFromEnemy -- Default to original offset
-
-	-- If we have multiple options, pick the one closest to our original intent
-	if #coastedPositions > 1 then
-		local bestMatch = nil
-		local bestDot = -math.huge
-		local originalDir = Normalize(offsetFromEnemy)
-
-		for _, coastedOffset in ipairs(coastedPositions) do
-			local coastedDir = Normalize(coastedOffset)
-			local dot = originalDir:Dot(coastedDir)
-			if dot > bestDot then
-				bestDot = dot
-				bestMatch = coastedOffset
-			end
-		end
-
-		if bestMatch then
-			newBestOffset = bestMatch
-		end
-	end
-
-	-- Calculate destination from coasted position using recalculated offset
-	local destination = enemyPos + newBestOffset
-	local directionToTarget = destination - pos
-	local optimalWishdir = Normalize(directionToTarget)
-
-	-- This wishdir is optimal - Pass 2 (SimulateDash) will handle full physics
-	return optimalWishdir
+	-- Always return normalized direction (full-length wishdir)
+	return Normalize(directionToTarget)
 end
 
 local function CalculateTrickstab(cmd)
@@ -1052,6 +1094,27 @@ local function CalculateTrickstab(cmd)
 	local my_pos = pLocalPos
 	local enemy_pos = TargetPlayer.Pos
 
+	-- Lag compensation: Predict enemy position ahead by half our ping
+	-- This accounts for the time it takes for our warp to reach the server
+	local netChan = clientstate.GetNetChannel()
+	if netChan and TargetPlayer.entity then
+		local latOut = netChan:GetLatency(0) -- FLOW_OUTGOING
+		local latIn = netChan:GetLatency(1) -- FLOW_INCOMING
+		local totalLatency = latOut + latIn
+		local halfPing = totalLatency / 2 -- Time for server to receive our position
+
+		-- Convert to ticks for simulation consistency
+		local tick_interval = globals.TickInterval()
+		local predictionTicks = math.floor(halfPing / tick_interval)
+		local predictionTime = predictionTicks * tick_interval
+
+		-- Predict where enemy will be when server processes our warp
+		local enemyVelocity = TargetPlayer.entity:EstimateAbsVelocity()
+		if enemyVelocity then
+			enemy_pos = enemy_pos + enemyVelocity * predictionTime
+		end
+	end
+
 	-- Get actual collision hulls from game (used in simulation)
 	local myMins, myMaxs = pLocal:GetMins(), pLocal:GetMaxs()
 	local myRadius = myMaxs.x -- Player's actual collision radius
@@ -1059,9 +1122,11 @@ local function CalculateTrickstab(cmd)
 	local enemyMaxs = TargetPlayer.maxs or Vector3(24, 24, 82)
 	local enemyRadius = TargetPlayer.hitboxRadius or 24
 
-	-- Corner positions: player radius + enemy radius + 1 unit buffer
-	-- Buffer ONLY for target point selection, NOT for simulation collision
-	local cornerDistance = myRadius + enemyRadius + 1
+	-- Combined hitbox size (exact collision boundary, NO buffer)
+	local combinedHitbox = myRadius + enemyRadius
+
+	-- Corner positions: combined hitbox + 1 unit buffer (for target point selection)
+	local cornerDistance = combinedHitbox
 	local dynamicCorners = {
 		Vector3(-cornerDistance, cornerDistance, 0.0), -- top left
 		Vector3(cornerDistance, cornerDistance, 0.0), -- top right
@@ -1069,8 +1134,9 @@ local function CalculateTrickstab(cmd)
 		Vector3(cornerDistance, -cornerDistance, 0.0), -- bottom right
 	}
 
-	-- Simulation uses REAL hitboxes (no buffer)
-	local hitbox_size = enemyRadius -- For direction detection
+	-- Direction detection uses EXACT combined hitbox (NO buffer)
+	-- Buffer would cause "center" detection when actually on a side
+	local hitbox_size = combinedHitbox
 	local vertical_range = TargetPlayer.hitboxHeight or 82 -- For vertical checks
 	local playerClass = pLocal:GetPropInt("m_iClass")
 	local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
@@ -1281,9 +1347,9 @@ local function CalculateTrickstab(cmd)
 	positions = allPaths
 	endwarps = allEndwarps
 
-	-- ALWAYS return direction to optimal side, even without backstab position
-	-- If no bestDirection from scoring, calculate direction to optimal side
-	if not bestDirection and optimalSidePos then
+	-- Only set fallback direction if we found at least some backstab points
+	-- If no backstab points at all, leave bestDirection nil so MoveAssistance uses simple approach
+	if not bestDirection and optimalSidePos and totalBackstabPoints > 0 then
 		bestDirection = enemy_pos + optimalSidePos - my_pos
 	end
 
@@ -1379,21 +1445,164 @@ local function AutoWarp(cmd)
 	local totalBackstabPoints
 	BackstabPos, bestScore, minWarpTicks, bestDirection, totalBackstabPoints = CalculateTrickstab(cmd)
 
-	-- PRIORITY 0: Movement Assistance - Works ALWAYS (even without backstab position)
-	-- Helps get into position by walking to optimal side
-	if Menu.Main.MoveAsistance and TargetPlayer and TargetPlayer.Pos then
+	-- PRIORITY 0: Movement Assistance - Helps reach enemy's back (footwork only)
+	-- Works standalone, but AutoWalk takes priority when stab points found
+	-- Picks LEFT or RIGHT side with smallest yaw delta to enemy's back
+	-- User can override: sidemove -450 = force RIGHT, +450 = force LEFT
+	local backstabPointCount = totalBackstabPoints or 0
+	local hasStabPoints = backstabPointCount > 0
+
+	-- AutoWalk has priority when enabled AND stab points found
+	local autoWalkTakesPriority = Menu.Main.AutoWalk and hasStabPoints
+
+	if Menu.Main.MoveAsistance and TargetPlayer and TargetPlayer.Pos and TargetPlayer.Back then
 		local canCurrentlyBackstab = CheckBackstab(pLocalPos)
-		if not canCurrentlyBackstab then
-			-- Use bestDirection from simulation if available, otherwise walk toward enemy
-			local dir = bestDirection or (TargetPlayer.Pos - pLocalPos)
 
-			-- Check if we have backstab points - if not, disable angle snap (less disruptive)
-			local backstabPointCount = totalBackstabPoints or 0
-			local hasStabPoints = backstabPointCount > 0
-			local forceNoSnap = not hasStabPoints -- Disable snap when just getting into position
+		-- MoveAssistance active when not backstabbing AND AutoWalk not taking priority
+		if not canCurrentlyBackstab and not autoWalkTakesPriority then
+			local my_pos = pLocalPos
+			local enemy_pos = TargetPlayer.Pos
+			local enemyBackYaw = NormalizeYaw(PositionYaw(enemy_pos, enemy_pos + TargetPlayer.Back))
 
+			-- Get hitbox sizes - use combinedHitbox (NO buffer) for direction detection
+			local myMins, myMaxs = pLocal:GetMins(), pLocal:GetMaxs()
+			local myRadius = myMaxs.x
+			local enemyRadius = TargetPlayer.hitboxRadius or 24
+			local combinedHitbox = myRadius + enemyRadius -- NO buffer for direction
+
+			-- Get velocity and speed for 2-pass wishdir calculation
+			local vel = pLocal:EstimateAbsVelocity()
+			local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
+
+			-- Direction detection uses EXACT combinedHitbox (NO buffer)
+			-- This tells us exactly where we are relative to enemy
+			local dx = enemy_pos.x - my_pos.x
+			local dy = enemy_pos.y - my_pos.y
+			local direction_x = ((dx > combinedHitbox) and 1 or 0) - ((dx < -combinedHitbox) and 1 or 0)
+			local direction_y = ((dy > combinedHitbox) and 1 or 0) - ((dy < -combinedHitbox) and 1 or 0)
+
+			-- Get corners from lookup table (index 2 = left, index 3 = right)
+			local cornerOptions = direction_to_corners[direction_x] and direction_to_corners[direction_x][direction_y]
+			if not cornerOptions or #cornerOptions < 3 then
+				cornerOptions = { center, Vector3(-1, 0, 0), Vector3(1, 0, 0) }
+			end
+
+			-- Target points use combinedHitbox + 1 unit buffer (for collision safety)
+			-- Buffer ONLY affects where we walk to, NOT direction detection
+			local cornerDist = combinedHitbox + 1 -- Buffer for target points
+
+			-- CRITICAL: Don't normalize corners! AABB corners are at (±dist, ±dist)
+			-- Normalizing ruins the geometry - diagonal becomes shorter
+			-- Instead, scale each component to cornerDist
+			local leftCorner = cornerOptions[2] or Vector3(-1, 0, 0)
+			local rightCorner = cornerOptions[3] or Vector3(1, 0, 0)
+
+			-- Scale to cornerDist per-component (preserves AABB shape)
+			local leftOffset = Vector3(
+				leftCorner.x ~= 0 and (leftCorner.x > 0 and cornerDist or -cornerDist) or 0,
+				leftCorner.y ~= 0 and (leftCorner.y > 0 and cornerDist or -cornerDist) or 0,
+				0
+			)
+			local rightOffset = Vector3(
+				rightCorner.x ~= 0 and (rightCorner.x > 0 and cornerDist or -cornerDist) or 0,
+				rightCorner.y ~= 0 and (rightCorner.y > 0 and cornerDist or -cornerDist) or 0,
+				0
+			)
+
+			-- DEPTH 2 scoring: simulate reaching first point, then find next optimal
+			-- This prevents getting stuck at left/right - continues circling to back
+
+			-- Helper: simulate walking in wishdir for N ticks, return end position
+			local function SimulateWalk(startPos, startVel, wishdir, ticks)
+				local pos = Vector3(startPos.x, startPos.y, startPos.z)
+				local simVel = Vector3(startVel.x, startVel.y, startVel.z)
+				local tick_interval = globals.TickInterval()
+
+				for i = 1, ticks do
+					-- Accelerate toward wishdir
+					local currentSpeed = simVel:Dot(wishdir)
+					local addSpeed = maxSpeed - currentSpeed
+					if addSpeed > 0 then
+						local accelSpeed = math.min(TF2_ACCEL * maxSpeed * tick_interval, addSpeed)
+						simVel = simVel + wishdir * accelSpeed
+					end
+					-- Cap speed
+					local horizSpeed = math.sqrt(simVel.x * simVel.x + simVel.y * simVel.y)
+					if horizSpeed > maxSpeed then
+						local scale = maxSpeed / horizSpeed
+						simVel = Vector3(simVel.x * scale, simVel.y * scale, simVel.z)
+					end
+					-- Friction
+					simVel = ApplyFriction(simVel, true)
+					-- Move
+					pos = pos + simVel * tick_interval
+				end
+				return pos, simVel
+			end
+
+			-- CalculateOptimalWishdir handles the +450 extension internally
+			-- Pass raw offsets - extension is done FROM our position TO target
+
+			-- Calculate LEFT path
+			local leftWishdir =
+				CalculateOptimalWishdir(my_pos, vel, leftOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
+			-- Simulate reaching left side (12 ticks)
+			local leftPos1, leftVel1 = SimulateWalk(my_pos, vel, leftWishdir, 12)
+			-- From there, find next optimal direction (toward back)
+			local backDir = Normalize(TargetPlayer.Back)
+			local backOffset = backDir * (combinedHitbox + 1) -- Just buffer, extension done in func
+			local leftWishdir2 =
+				CalculateOptimalWishdir(leftPos1, leftVel1, backOffset, enemy_pos, 12, maxSpeed, combinedHitbox, 82)
+			-- Simulate second step
+			local leftPos2 = SimulateWalk(leftPos1, leftVel1, leftWishdir2, 12)
+			-- Score by final yaw to enemy's back
+			local leftYaw = NormalizeYaw(PositionYaw(enemy_pos, leftPos2))
+			local leftYawDiff = math.abs(NormalizeYaw(leftYaw - enemyBackYaw))
+
+			-- Calculate RIGHT path
+			local rightWishdir =
+				CalculateOptimalWishdir(my_pos, vel, rightOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
+			-- Simulate reaching right side (12 ticks)
+			local rightPos1, rightVel1 = SimulateWalk(my_pos, vel, rightWishdir, 12)
+			-- From there, find next optimal direction (toward back)
+			local rightWishdir2 = CalculateOptimalWishdir(
+				rightPos1,
+				rightVel1,
+				backOffset, -- Same backOffset, extension done in func
+				enemy_pos,
+				12,
+				maxSpeed,
+				combinedHitbox,
+				82
+			)
+			-- Simulate second step
+			local rightPos2 = SimulateWalk(rightPos1, rightVel1, rightWishdir2, 12)
+			-- Score by final yaw to enemy's back
+			local rightYaw = NormalizeYaw(PositionYaw(enemy_pos, rightPos2))
+			local rightYawDiff = math.abs(NormalizeYaw(rightYaw - enemyBackYaw))
+
+			-- Pick direction to CIRCLE toward (not destination, continuous movement)
+			local wishdir
+			local userSideMove = cmd:GetSideMove()
+
+			-- Manual override: TF2 sidemove: positive = right (D key), negative = left (A key)
+			if Menu.Advanced.ManualDirection then
+				if userSideMove >= 400 then
+					wishdir = rightWishdir -- Force RIGHT (D key, positive sidemove)
+				elseif userSideMove <= -400 then
+					wishdir = leftWishdir -- Force LEFT (A key, negative sidemove)
+				else
+					-- No manual input - auto pick smallest yaw delta
+					wishdir = (leftYawDiff < rightYawDiff) and leftWishdir or rightWishdir
+				end
+			else
+				-- Auto mode: always pick smallest yaw delta to enemy's back
+				wishdir = (leftYawDiff < rightYawDiff) and leftWishdir or rightWishdir
+			end
+
+			-- MoveAssistance continuously circles enemy (footwork only, no camera snap)
 			FakelagOn()
-			WalkInDirection(cmd, dir, forceNoSnap)
+			WalkInDirection(cmd, wishdir, true) -- forceNoSnap = true
 		end
 	end
 
@@ -1548,9 +1757,12 @@ local function OnCreateMove(cmd)
 	end
 
 	TargetPlayer = UpdateTarget()
-	if TargetPlayer == {} then
+	if not TargetPlayer or not TargetPlayer.entity then
+		-- No valid target - update cache for next tick
 		UpdateSimulationCache()
 	else
+		-- Valid target - run trickstab logic
+		UpdateSimulationCache() -- Keep cache fresh
 		AutoWarp(cmd)
 	end
 end
