@@ -270,6 +270,15 @@ local function PositionYaw(source, dest)
 	return math.deg(math.atan(delta.y, delta.x))
 end
 
+-- Returns pitch and yaw angles from source looking at dest
+local function PositionAngles(source, dest)
+	local delta = dest - source
+	local dist = math.sqrt(delta.x * delta.x + delta.y * delta.y)
+	local pitch = math.deg(math.atan(-delta.z, dist))
+	local yaw = math.deg(math.atan(delta.y, delta.x))
+	return { pitch = pitch, yaw = yaw }
+end
+
 -- Check if a value is NaN
 local function IsNaN(value)
 	return value ~= value
@@ -954,6 +963,12 @@ local function SimulateDash(targetDirection, ticks)
 			vel.z = vel.z - gravity
 		end
 
+		-- EARLY TERMINATION: Stop if horizontal speed drops below 5 units/tick (wall sliding too slow)
+		local horizSpeed = math.sqrt(vel.x * vel.x + vel.y * vel.y)
+		if horizSpeed < 37 then
+			break -- No point simulating further, we're stuck
+		end
+
 		-- Check for backstab possibility at the current position
 		local isBackstab = CheckBackstab(pos)
 
@@ -1264,22 +1279,39 @@ local function CalculateTrickstab(cmd)
 	local bestDirection = nil
 	local totalBackstabPoints = 0 -- Count total backstab positions found
 
-	-- Simulate BOTH paths with 2-pass approach
+	-- Simulate ALL 3 paths with 2-pass approach (LEFT, RIGHT, CENTER)
 	local simulationTargets = {}
 
-	-- Path 1: Optimal side
+	-- Find other side position (opposite of optimal)
+	local otherSidePos = nil
+	local otherSide = (best_side == "left") and "right" or "left"
+	for i, pos in ipairs(all_positions) do
+		if pos ~= center then
+			if (otherSide == "left" and pos.y < 0) or (otherSide == "right" and pos.y > 0) then
+				otherSidePos = pos
+				break
+			end
+		end
+	end
+
+	-- Check our yaw delta from enemy's back (for CENTER eligibility)
+	local enemyBackYaw = NormalizeYaw(PositionYaw(enemy_pos, enemy_pos + TargetPlayer.Back))
+	local ourYawToEnemy = NormalizeYaw(PositionYaw(enemy_pos, my_pos))
+	local ourYawDeltaFromBack = math.abs(NormalizeYaw(ourYawToEnemy - enemyBackYaw))
+	local withinBackAngle = ourYawDeltaFromBack <= 90
+
+	-- Track if optimal side hit a wall (to decide if we need other_side)
+	local optimalHitWall = false
+
+	-- Path 1: Optimal side (always simulate - best yaw to back)
 	if optimalSidePos then
 		table.insert(simulationTargets, { name = "optimal_side", offset = optimalSidePos })
 	else
 		print("ERROR: No optimal side position found!")
 	end
 
-	-- Path 2: Center/back
-	table.insert(simulationTargets, { name = "center", offset = center })
-
-	for _, simTarget in ipairs(simulationTargets) do
-		-- PASS 1: Calculate optimal wishdir based on coasting projection
-		-- This recalculates best position from coasted endpoint to avoid backwards acceleration
+	-- Helper to simulate a single path and check wall hit
+	local function SimulatePath(simTarget)
 		local optimalWishdir = CalculateOptimalWishdir(
 			my_pos,
 			currentVel,
@@ -1290,57 +1322,84 @@ local function CalculateTrickstab(cmd)
 			hitbox_size,
 			vertical_range
 		)
-
-		-- Convert wishdir to direction vector for SimulateDash (it will normalize internally)
-		local targetDirection = optimalWishdir * 100 -- Scale up for direction vector
-
-		-- PASS 2: Full simulation with calculated wishdir locked for entire warp
+		local targetDirection = optimalWishdir * 100
 		local final_pos, minTicks, simPath, simEndwarps = SimulateDash(targetDirection, warpTicks)
 
-		-- Store this simulation path for visualization (store all paths)
-		table.insert(allPaths, simPath)
-		table.insert(allEndwarps, simEndwarps)
+		-- Check if simulation was cut short (hit wall / early termination)
+		local expectedTicks = warpTicks
+		local actualTicks = simPath and #simPath or 0
+		local hitWall = actualTicks < expectedTicks
 
-		-- Score EVERY backstab position in this simulation path
-		if simEndwarps then
-			for tick, warpData in ipairs(simEndwarps) do
-				-- Safely unpack warp data
-				local backstab_pos = warpData[1]
-				local isBackstab = warpData[2]
-				local tickNum = warpData[3] or tick -- Fallback to loop index
+		return simPath, simEndwarps, optimalWishdir, hitWall
+	end
 
-				if isBackstab and backstab_pos then
-					totalBackstabPoints = totalBackstabPoints + 1 -- Count all backstab points
+	-- Helper to score endwarps and update best backstab position
+	local function ScoreEndwarps(simEndwarps, targetDirection)
+		if not simEndwarps then
+			return
+		end
+		for tick, warpData in ipairs(simEndwarps) do
+			local backstab_pos = warpData[1]
+			local isBackstab = warpData[2]
+			local tickNum = warpData[3] or tick
 
-					-- Calculate angle from stab position to enemy
-					local spyYaw = PositionYaw(enemy_pos, backstab_pos)
-					local enemyYaw = TargetPlayer.viewYaw
-					local isWithinBackstabYaw = CheckYawDelta(spyYaw, enemyYaw)
+			if isBackstab and backstab_pos then
+				totalBackstabPoints = totalBackstabPoints + 1
 
-					if isWithinBackstabYaw then
-						-- Angle from enemy's BACK (0 = directly behind, 90 = edge)
-						local yawDiff = math.abs(NormalizeYaw(spyYaw - enemyYaw))
-						local yawComponent = math.max(0, 1 - yawDiff / 90)
+				local spyYaw = PositionYaw(enemy_pos, backstab_pos)
+				local enemyYaw = TargetPlayer.viewYaw
+				local isWithinBackstabYaw = CheckYawDelta(spyYaw, enemyYaw)
 
-						-- Distance from STAB POSITION to ENEMY
-						local distance = (backstab_pos - enemy_pos):Length()
-						local distanceComponent = math.max(0, 1 - distance / 120)
+				if isWithinBackstabYaw then
+					local yawDiff = math.abs(NormalizeYaw(spyYaw - enemyYaw))
+					local yawComponent = math.max(0, 1 - yawDiff / 90)
+					local distance = (backstab_pos - enemy_pos):Length()
+					local distanceComponent = math.max(0, 1 - distance / 120)
+					local score = 0.7 * yawComponent + 0.3 * distanceComponent
 
-						-- Score: 70% angle, 30% distance
-						local score = 0.7 * yawComponent + 0.3 * distanceComponent
-
-						-- Pick highest score (or same score with fewer ticks)
-						if score > bestScore or (score == bestScore and tickNum < minWarpTicks) then
-							bestScore = score
-							optimalBackstabPos = backstab_pos
-							minWarpTicks = tickNum
-							bestDirection = targetDirection
-							-- print(string.format("[SCORE] tick=%d, angle=%.1f°, dist=%.0f, score=%.3f", tickNum, yawDiff, distance, score))
-						end
+					if score > bestScore or (score == bestScore and tickNum < minWarpTicks) then
+						bestScore = score
+						optimalBackstabPos = backstab_pos
+						minWarpTicks = tickNum
+						bestDirection = targetDirection
 					end
 				end
 			end
 		end
+	end
+
+	-- First simulate optimal side to check if it hits a wall
+	local optimalPath, optimalEndwarps, optimalWishdir, optimalHitWall
+	if optimalSidePos then
+		optimalPath, optimalEndwarps, optimalWishdir, optimalHitWall = SimulatePath(simulationTargets[1])
+		table.insert(allPaths, optimalPath)
+		table.insert(allEndwarps, optimalEndwarps)
+		-- Score the optimal path
+		ScoreEndwarps(optimalEndwarps, optimalWishdir * 100)
+	end
+
+	-- Path 2: Other side - show if optimal hit a wall OR within 90° of back
+	-- This helps assistance pick the path with more open space
+	if otherSidePos and (optimalHitWall or withinBackAngle) then
+		table.insert(simulationTargets, { name = "other_side", offset = otherSidePos })
+	end
+
+	-- Path 3: Center/back - ONLY if within 90° of back
+	if withinBackAngle then
+		table.insert(simulationTargets, { name = "center", offset = center })
+	end
+
+	-- Simulate remaining paths (skip first which we already did)
+	for i = 2, #simulationTargets do
+		local simTarget = simulationTargets[i]
+		local simPath, simEndwarps, wishdir, hitWall = SimulatePath(simTarget)
+
+		-- Store this simulation path for visualization
+		table.insert(allPaths, simPath)
+		table.insert(allEndwarps, simEndwarps)
+
+		-- Score this path
+		ScoreEndwarps(simEndwarps, wishdir * 100)
 	end
 
 	-- Set global visualization data to show ALL paths (not just best one)
@@ -1429,8 +1488,64 @@ local function PerformControlledWarp(cmd, optimalDirection, warpTicks)
 	-- The input we just set with WalkInDirection will be used
 	warp.TriggerWarp()
 
+	-- Track warp time for auto recharge cooldown
+	LastWarpTime = globals.RealTime()
+
 	-- Reset
 	client.SetConVar("sv_maxusrcmdprocessticks", 24, true)
+end
+
+-- Auto recharge state
+local LastWarpTime = 0
+local AutoRechargeQueued = false
+
+-- Auto recharge logic - call this every tick
+local function HandleAutoRecharge()
+	if not Menu.Advanced.AutoRecharge then
+		return
+	end
+
+	local currentTime = globals.RealTime()
+	local chargedTicks = warp.GetChargedTicks() or 0
+
+	-- If warp not fully charged and we warped recently
+	if chargedTicks < 24 and LastWarpTime > 0 then
+		-- Get ping-based cooldown using Latency variable (already calculated)
+		local ping = Latency or 0 -- Latency in seconds
+		local cooldown = ping + 0.1 -- Ping + 100ms buffer
+
+		-- Wait for cooldown after warp before recharging
+		if currentTime - LastWarpTime > cooldown then
+			warp.TriggerCharge() -- Recharge warp
+			LastWarpTime = 0 -- Reset to avoid repeated triggers
+		end
+	end
+end
+
+-- On kill recharge - instant recharge on successful kill
+local function OnKillRecharge(event)
+	if not Menu.Advanced.AutoRecharge then
+		return
+	end
+	if event:GetName() ~= "player_death" then
+		return
+	end
+
+	local localPlayer = entities.GetLocalPlayer()
+	if not localPlayer then
+		return
+	end
+
+	local attackerIdx = event:GetInt("attacker")
+	local victimIdx = event:GetInt("userid")
+
+	-- Check if we are the attacker
+	local attackerEntity = entities.GetByUserID(attackerIdx)
+	if attackerEntity and attackerEntity:GetIndex() == localPlayer:GetIndex() then
+		-- We got a kill - instant recharge
+		warp.TriggerCharge()
+		LastWarpTime = 0
+	end
 end
 
 -- Modified AutoWarp to use minWarpTicks from CalculateTrickstab
@@ -1513,91 +1628,173 @@ local function AutoWarp(cmd)
 			-- This prevents getting stuck at left/right - continues circling to back
 
 			-- Helper: simulate walking in wishdir for N ticks, return end position
+			-- Also tracks wall collisions - returns ticksBeforeWall (more = better, open space)
 			local function SimulateWalk(startPos, startVel, wishdir, ticks)
 				local pos = Vector3(startPos.x, startPos.y, startPos.z)
 				local simVel = Vector3(startVel.x, startVel.y, startVel.z)
 				local tick_interval = globals.TickInterval()
+				local ticksBeforeWall = ticks -- Assume no wall hit
+
+				-- Use actual current speed if higher than class max (speed buffs)
+				local actualSpeed = math.sqrt(startVel.x * startVel.x + startVel.y * startVel.y)
+				local effectiveMaxSpeed = math.max(maxSpeed, actualSpeed)
+
+				-- Get player hull for traces
+				local mins = myMins or Vector3(-24, -24, 0)
+				local maxs = myMaxs or Vector3(24, 24, 82)
 
 				for i = 1, ticks do
 					-- Accelerate toward wishdir
 					local currentSpeed = simVel:Dot(wishdir)
-					local addSpeed = maxSpeed - currentSpeed
+					local addSpeed = effectiveMaxSpeed - currentSpeed
 					if addSpeed > 0 then
-						local accelSpeed = math.min(TF2_ACCEL * maxSpeed * tick_interval, addSpeed)
+						local accelSpeed = math.min(TF2_ACCEL * effectiveMaxSpeed * tick_interval, addSpeed)
 						simVel = simVel + wishdir * accelSpeed
 					end
-					-- Cap speed
+					-- Cap speed (only to effective max, preserves buffs)
 					local horizSpeed = math.sqrt(simVel.x * simVel.x + simVel.y * simVel.y)
-					if horizSpeed > maxSpeed then
-						local scale = maxSpeed / horizSpeed
+					if horizSpeed > effectiveMaxSpeed then
+						local scale = effectiveMaxSpeed / horizSpeed
 						simVel = Vector3(simVel.x * scale, simVel.y * scale, simVel.z)
 					end
 					-- Friction
 					simVel = ApplyFriction(simVel, true)
-					-- Move
-					pos = pos + simVel * tick_interval
+
+					-- Calculate next position
+					local nextPos = pos + simVel * tick_interval
+
+					-- Wall collision check (forward trace)
+					local wallTrace = engine.TraceHull(pos, nextPos, mins, maxs, MASK_PLAYERSOLID_BRUSHONLY)
+					if wallTrace.fraction < 1.0 then
+						-- Hit a wall - record when and handle sliding
+						if ticksBeforeWall == ticks then
+							ticksBeforeWall = i -- First wall hit
+						end
+						-- Slide along wall (remove velocity into wall)
+						local normal = wallTrace.plane
+						if normal then
+							local dot = simVel:Dot(normal)
+							if dot < 0 then
+								simVel = simVel - normal * dot
+							end
+						end
+						pos = wallTrace.endpos
+
+						-- EARLY TERMINATION: Stop if sliding speed drops below 5 units/tick
+						local slideSpeed = math.sqrt(simVel.x * simVel.x + simVel.y * simVel.y)
+						if slideSpeed < 37 then
+							ticksBeforeWall = i -- Record where we got stuck
+							break -- No point simulating further
+						end
+					else
+						pos = nextPos
+					end
 				end
-				return pos, simVel
+				return pos, simVel, ticksBeforeWall
 			end
 
 			-- CalculateOptimalWishdir handles the +450 extension internally
 			-- Pass raw offsets - extension is done FROM our position TO target
 
-			-- Calculate LEFT path
+			local backDir = Normalize(TargetPlayer.Back)
+			local backOffset = backDir * (combinedHitbox + 1)
+
+			-- Calculate LEFT path with wall collision tracking
 			local leftWishdir =
 				CalculateOptimalWishdir(my_pos, vel, leftOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
-			-- Simulate reaching left side (12 ticks)
-			local leftPos1, leftVel1 = SimulateWalk(my_pos, vel, leftWishdir, 12)
-			-- From there, find next optimal direction (toward back)
-			local backDir = Normalize(TargetPlayer.Back)
-			local backOffset = backDir * (combinedHitbox + 1) -- Just buffer, extension done in func
+			local leftPos1, leftVel1, leftWall1 = SimulateWalk(my_pos, vel, leftWishdir, 12)
 			local leftWishdir2 =
 				CalculateOptimalWishdir(leftPos1, leftVel1, backOffset, enemy_pos, 12, maxSpeed, combinedHitbox, 82)
-			-- Simulate second step
-			local leftPos2 = SimulateWalk(leftPos1, leftVel1, leftWishdir2, 12)
-			-- Score by final yaw to enemy's back
+			local leftPos2, _, leftWall2 = SimulateWalk(leftPos1, leftVel1, leftWishdir2, 12)
 			local leftYaw = NormalizeYaw(PositionYaw(enemy_pos, leftPos2))
 			local leftYawDiff = math.abs(NormalizeYaw(leftYaw - enemyBackYaw))
+			local leftOpenSpace = leftWall1 + leftWall2 -- Total ticks before wall (higher = more open)
 
-			-- Calculate RIGHT path
+			-- Calculate RIGHT path with wall collision tracking
 			local rightWishdir =
 				CalculateOptimalWishdir(my_pos, vel, rightOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
-			-- Simulate reaching right side (12 ticks)
-			local rightPos1, rightVel1 = SimulateWalk(my_pos, vel, rightWishdir, 12)
-			-- From there, find next optimal direction (toward back)
-			local rightWishdir2 = CalculateOptimalWishdir(
-				rightPos1,
-				rightVel1,
-				backOffset, -- Same backOffset, extension done in func
-				enemy_pos,
-				12,
-				maxSpeed,
-				combinedHitbox,
-				82
-			)
-			-- Simulate second step
-			local rightPos2 = SimulateWalk(rightPos1, rightVel1, rightWishdir2, 12)
-			-- Score by final yaw to enemy's back
+			local rightPos1, rightVel1, rightWall1 = SimulateWalk(my_pos, vel, rightWishdir, 12)
+			local rightWishdir2 =
+				CalculateOptimalWishdir(rightPos1, rightVel1, backOffset, enemy_pos, 12, maxSpeed, combinedHitbox, 82)
+			local rightPos2, _, rightWall2 = SimulateWalk(rightPos1, rightVel1, rightWishdir2, 12)
 			local rightYaw = NormalizeYaw(PositionYaw(enemy_pos, rightPos2))
 			local rightYawDiff = math.abs(NormalizeYaw(rightYaw - enemyBackYaw))
+			local rightOpenSpace = rightWall1 + rightWall2
 
-			-- Pick direction to CIRCLE toward (not destination, continuous movement)
+			-- Score function
+			local function ScorePath(yawDiff, openSpace)
+				-- Lower score = better. Penalize wall hits heavily
+				return yawDiff + (24 - openSpace) * 10
+			end
+
+			local leftScore = ScorePath(leftYawDiff, leftOpenSpace)
+			local rightScore = ScorePath(rightYawDiff, rightOpenSpace)
+
+			-- OPTIMIZATION: Only simulate CENTER if:
+			-- 1. LEFT or RIGHT hit a wall, AND
+			-- 2. We're within 90° of enemy's back (no point warping to back if we're in front)
+			local centerWishdir, centerScore
+			local eitherHitWall = leftOpenSpace < 24 or rightOpenSpace < 24
+
+			-- Check our yaw delta from enemy's back
+			local ourYawToEnemy = NormalizeYaw(PositionYaw(enemy_pos, my_pos))
+			local ourYawDeltaFromBack = math.abs(NormalizeYaw(ourYawToEnemy - enemyBackYaw))
+			local withinBackAngle = ourYawDeltaFromBack <= 90
+
+			if eitherHitWall and withinBackAngle then
+				local centerOffset = backDir * (combinedHitbox + 1)
+				centerWishdir =
+					CalculateOptimalWishdir(my_pos, vel, centerOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
+				local centerPos1, centerVel1, centerWall1 = SimulateWalk(my_pos, vel, centerWishdir, 12)
+				local centerWishdir2 = CalculateOptimalWishdir(
+					centerPos1,
+					centerVel1,
+					backOffset,
+					enemy_pos,
+					12,
+					maxSpeed,
+					combinedHitbox,
+					82
+				)
+				local centerPos2, _, centerWall2 = SimulateWalk(centerPos1, centerVel1, centerWishdir2, 12)
+				local centerYaw = NormalizeYaw(PositionYaw(enemy_pos, centerPos2))
+				local centerYawDiff = math.abs(NormalizeYaw(centerYaw - enemyBackYaw))
+				local centerOpenSpace = centerWall1 + centerWall2
+				centerScore = ScorePath(centerYawDiff, centerOpenSpace)
+			else
+				-- No wall hit - center not needed, give it worst score
+				centerScore = math.huge
+			end
+
+			-- Pick direction to CIRCLE toward
 			local wishdir
 			local userSideMove = cmd:GetSideMove()
 
 			-- Manual override: TF2 sidemove: positive = right (D key), negative = left (A key)
 			if Menu.Advanced.ManualDirection then
 				if userSideMove >= 400 then
-					wishdir = rightWishdir -- Force RIGHT (D key, positive sidemove)
+					wishdir = rightWishdir
 				elseif userSideMove <= -400 then
-					wishdir = leftWishdir -- Force LEFT (A key, negative sidemove)
+					wishdir = leftWishdir
 				else
-					-- No manual input - auto pick smallest yaw delta
-					wishdir = (leftYawDiff < rightYawDiff) and leftWishdir or rightWishdir
+					-- Auto pick best score
+					if leftScore <= rightScore and leftScore <= centerScore then
+						wishdir = leftWishdir
+					elseif rightScore <= centerScore then
+						wishdir = rightWishdir
+					else
+						wishdir = centerWishdir
+					end
 				end
 			else
-				-- Auto mode: always pick smallest yaw delta to enemy's back
-				wishdir = (leftYawDiff < rightYawDiff) and leftWishdir or rightWishdir
+				-- Auto mode: pick best score (open space + yaw)
+				if leftScore <= rightScore and leftScore <= centerScore then
+					wishdir = leftWishdir
+				elseif rightScore <= centerScore then
+					wishdir = rightWishdir
+				else
+					wishdir = centerWishdir
+				end
 			end
 
 			-- MoveAssistance continuously circles enemy (footwork only, no camera snap)
@@ -1631,7 +1828,18 @@ local function AutoWarp(cmd)
 		-- Requires at least 1 backstab point to confirm simulation found valid path
 		if Menu.Main.AutoWalk and not canCurrentlyBackstab and hasAnyBackstabPoints then
 			FakelagOn()
-			WalkInDirection(cmd, dir) -- Walk to optimal side chosen by simulation
+
+			-- FIRST: Snap view angles to backstab position (so warp will work correctly)
+			if Menu.Advanced.UseAngleSnap and BackstabPos and BackstabPos ~= emptyVec then
+				local lookAngles = PositionAngles(pLocalPos, BackstabPos)
+				if lookAngles then
+					cmd:SetViewAngles(lookAngles.pitch, lookAngles.yaw, 0)
+					engine.SetViewAngles(EulerAngles(lookAngles.pitch, lookAngles.yaw, 0))
+				end
+			end
+
+			-- THEN: Walk toward the optimal direction (footwork)
+			WalkInDirection(cmd, dir, not Menu.Advanced.UseAngleSnap) -- forceNoSnap if angle snap disabled
 			-- Don't return yet - check if we should also warp
 		end
 
@@ -1710,7 +1918,7 @@ local function OnCreateMove(cmd)
 		warpConfirmed = false
 	end
 
-	-- Auto recharge logic: Recharge when kill/hurt confirmed or 7 ticks after warp
+	-- Auto recharge logic: Recharge when kill/hurt confirmed or ping-based cooldown after warp
 	if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 and not warp.CanWarp() then
 		local shouldRecharge = false
 
@@ -1719,11 +1927,13 @@ local function OnCreateMove(cmd)
 			shouldRecharge = true
 		end
 
-		-- Check 2: 7 ticks passed since warp (fallback timer)
+		-- Check 2: Ping-based cooldown after warp (latency + buffer in ticks)
 		if warpExecutedTick > 0 then
 			local currentTick = globals.TickCount()
 			local ticksSinceWarp = currentTick - warpExecutedTick
-			if ticksSinceWarp >= 7 then
+			-- Use latency-based cooldown: Latency in ticks + 5 tick buffer
+			local pingCooldown = math.max(7, (Latency or 0) + 5)
+			if ticksSinceWarp >= pingCooldown then
 				shouldRecharge = true
 			end
 		end
@@ -1887,10 +2097,15 @@ local function doDraw()
 					goto continue_path
 				end
 
-				-- Path colors: Path 1 = Green, Path 2 = Cyan
-				local baseR = pathIdx == 1 and 0 or 0
-				local baseG = pathIdx == 1 and 255 or 200
-				local baseB = pathIdx == 1 and 0 or 255
+				-- Path colors: Path 1 = Green (optimal), Path 2 = Orange (other side), Path 3 = Cyan (center)
+				local baseR, baseG, baseB
+				if pathIdx == 1 then
+					baseR, baseG, baseB = 0, 255, 0 -- Green for optimal side
+				elseif pathIdx == 2 then
+					baseR, baseG, baseB = 255, 150, 0 -- Orange for other side
+				else
+					baseR, baseG, baseB = 0, 200, 255 -- Cyan for center
+				end
 
 				-- Draw gradient lines ONLY within THIS path (not connecting to other paths)
 				for i = 1, #path - 1 do
@@ -2155,6 +2370,7 @@ callbacks.Unregister("CreateMove", "AtSM_CreateMove") -- Unregister the "CreateM
 callbacks.Unregister("Unload", "AtSM_Unload") -- Unregister the "Unload" callback
 callbacks.Unregister("Draw", "AtSM_Draw") -- Unregister the "Draw" callback
 callbacks.Unregister("FireGameEvent", "adaamageLogger")
+callbacks.Unregister("FireGameEvent", "AtSM_KillRecharge")
 
 --[[ Register callbacks ]]
 --
@@ -2162,6 +2378,7 @@ callbacks.Register("CreateMove", "AtSM_CreateMove", OnCreateMove) -- Register th
 callbacks.Register("Unload", "AtSM_Unload", OnUnload) -- Register the "Unload" callback
 callbacks.Register("Draw", "AtSM_Draw", doDraw) -- Register the "Draw" callback
 callbacks.Register("FireGameEvent", "adaamageLogger", damageLogger)
+callbacks.Register("FireGameEvent", "AtSM_KillRecharge", OnKillRecharge) -- Auto recharge on kill
 
 --[[ Play sound when loaded ]]
 --
