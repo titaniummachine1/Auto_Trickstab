@@ -279,11 +279,6 @@ local function PositionAngles(source, dest)
 	return { pitch = pitch, yaw = yaw }
 end
 
--- Check if a value is NaN
-local function IsNaN(value)
-	return value ~= value
-end
-
 -- TF2 Physics Constants for velocity simulation
 local TF2_GROUND_FRICTION = 4.0
 local TF2_STOPSPEED = 100
@@ -313,108 +308,6 @@ local function ApplyFriction(velocity, onGround)
 	end
 
 	return velocity
-end
-
--- Calculate optimal movement direction towards target
-local function CalculateOptimalMoveDir(currentVel, currentPos, targetPos)
-	local toTarget = targetPos - currentPos
-	local distance = toTarget:Length()
-
-	if distance < 1 then
-		return Vector3(0, 0, 0)
-	end
-
-	local targetDir = Normalize(toTarget)
-
-	-- If we have velocity, blend with current direction for smooth pathing
-	local currentSpeed = currentVel:Length()
-	if currentSpeed > 10 then
-		local currentDir = Normalize(currentVel)
-		-- Blend 30% current direction, 70% target direction
-		local blendedDir = Normalize(currentDir * 0.3 + targetDir * 0.7)
-		return blendedDir
-	end
-
-	return targetDir
-end
-
--- Simulate optimal path with velocity and acceleration
-local function SimulateVelocityPath(startPos, startVel, targetPos, numTicks, playerClass)
-	local pos = startPos
-	local vel = startVel
-	local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
-
-	for tick = 1, numTicks do
-		-- Calculate optimal direction
-		local optimalDir = CalculateOptimalMoveDir(vel, pos, targetPos)
-
-		-- Apply acceleration towards target
-		local accelVector = optimalDir * (TF2_ACCEL * 10 * globals.TickInterval())
-		vel = vel + accelVector
-
-		-- Cap to max speed (horizontal only)
-		local horizSpeed = math.sqrt(vel.x * vel.x + vel.y * vel.y)
-		if horizSpeed > maxSpeed then
-			local scale = maxSpeed / horizSpeed
-			vel = Vector3(vel.x * scale, vel.y * scale, vel.z)
-		end
-
-		-- Apply friction
-		vel = ApplyFriction(vel, true) -- Assume on ground during warp
-
-		-- Update position
-		pos = pos + vel * globals.TickInterval()
-	end
-
-	return pos, vel
-end
-
--- ===== TWO-PASS WARP SIMULATION SYSTEM =====
-
--- Simplified physics simulation for warp (no collision, no gravity if on ground)
-local function SimulateWarpNoCollision(startPos, startVel, moveDir, warpTicks, playerClass)
-	local pos = startPos
-	local vel = startVel
-	local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
-
-	for tick = 1, warpTicks do
-		-- Apply acceleration in movement direction
-		local accelVector = moveDir * (TF2_ACCEL * 10 * globals.TickInterval())
-		vel = vel + accelVector
-
-		-- Cap to max speed (horizontal only)
-		local horizSpeed = math.sqrt(vel.x * vel.x + vel.y * vel.y)
-		if horizSpeed > maxSpeed then
-			local scale = maxSpeed / horizSpeed
-			vel = Vector3(vel.x * scale, vel.y * scale, vel.z)
-		end
-
-		-- Apply friction (assuming on ground during warp)
-		vel = ApplyFriction(vel, true)
-
-		-- Update position (no collision check, no gravity if on ground)
-		pos = pos + vel * globals.TickInterval()
-	end
-
-	return pos, vel
-end
-
--- Calculate optimal movement direction to reach target
-local function CalculateOptimalMoveDirection(currentPos, currentVel, targetPos, warpTicks, playerClass)
-	-- Direct vector to target
-	local toTarget = targetPos - currentPos
-	local targetDir = Normalize(Vector3(toTarget.x, toTarget.y, 0)) -- Horizontal only
-
-	-- If we have significant velocity, blend it with target direction
-	local currentSpeed = currentVel:Length()
-	if currentSpeed > 50 then
-		local currentDir = Normalize(Vector3(currentVel.x, currentVel.y, 0))
-		-- Less blending - prioritize target direction (80% target, 20% current)
-		local blendedDir = Normalize(currentDir * 0.2 + targetDir * 0.8)
-		return blendedDir
-	end
-
-	return targetDir
 end
 
 -- Constants for movement
@@ -504,38 +397,6 @@ local function WalkInDirection(cmd, direction, forceNoSnap)
 		cmd:SetSideMove(side)
 	end
 end
-
--- Ground-physics helpers
-local DEFAULT_GROUND_FRICTION = 4
-local DEFAULT_SV_ACCELERATE = 10
-
-local function GetGroundFriction()
-	local ok, val = pcall(client.GetConVar, "sv_friction")
-	if ok and val and val > 0 then
-		return val
-	end
-	return DEFAULT_GROUND_FRICTION
-end
-
-local function GetGroundMaxDeltaV(player, tick)
-	tick = (tick and tick > 0) and tick or globals.TickInterval()
-	local svA = client.GetConVar("sv_accelerate") or 0
-	if svA <= 0 then
-		svA = DEFAULT_SV_ACCELERATE
-	end
-
-	local cap = player and player:GetPropFloat("m_flMaxspeed") or MAX_CMD_SPEED
-	if not cap or cap <= 0 then
-		cap = MAX_CMD_SPEED
-	end
-
-	return svA * cap * tick
-end
-
--- Computes the move vector between two points (from A_standstillDummy.lua)
----@param userCmd UserCmd
----@param a Vector3
----@param b Vector3
 
 local BackstabPos = emptyVec
 local globalCounter = 0
@@ -778,68 +639,38 @@ local function UpdateSimulationCache()
 	simulationCache.flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
 end
 
-local ignoreEntities = { "CTFAmmoPack", "CTFDroppedWeapon" }
 local function shouldHitEntityFun(entity, player)
-	-- Safety: check entity is valid
 	if not entity then
 		return false
 	end
 
-	-- Ignore specific entity classes
-	local ok, entClass = pcall(function()
-		return entity:GetClass()
-	end)
-	if ok and entClass then
-		for _, ignoreEntity in ipairs(ignoreEntities) do
-			if entClass == ignoreEntity then
-				return false
-			end
-		end
-	end
-
-	-- Check if entity is at a solid world position (stairs, ramps, brushes)
-	-- This is the key fix from Swing Prediction!
-	local ok2, pos = pcall(function()
-		return entity:GetAbsOrigin()
-	end)
-	if ok2 and pos then
-		pos = pos + Vector3(0, 0, 1)
-		local contents = engine.GetPointContents(pos)
-		if contents ~= 0 then
-			return true -- This is world geometry, hit it
-		end
-	end
-
-	-- Check if entity is a player
-	local ok5, isPlayer = pcall(function()
-		return entity:IsPlayer()
-	end)
-
-	if ok5 and isPlayer then
+	-- Most common: player collision (check first for speed)
+	if entity:IsPlayer() then
 		-- Ignore self
-		local ok3, entName = pcall(function()
-			return entity:GetName()
-		end)
-		local ok4, playerName = pcall(function()
-			return player:GetName()
-		end)
-		if ok3 and ok4 and entName == playerName then
-			return false -- Don't collide with ourselves
+		if entity:GetIndex() == player:GetIndex() then
+			return false
 		end
-
-		-- Ignore teammates (same team as us)
-		local ok6, entTeam = pcall(function()
-			return entity:GetTeamNumber()
-		end)
-		local ok7, playerTeam = pcall(function()
-			return player:GetTeamNumber()
-		end)
-		if ok6 and ok7 and entTeam == playerTeam then
-			return false -- Don't collide with teammates
+		-- Ignore teammates
+		if entity:GetTeamNumber() == player:GetTeamNumber() then
+			return false
 		end
-
-		-- HIT enemy players (we need to collide with target!)
+		-- Hit enemy players
 		return true
+	end
+
+	-- World geometry (stairs, ramps, brushes)
+	local pos = entity:GetAbsOrigin()
+	if pos then
+		local contents = engine.GetPointContents(pos + Vector3(0, 0, 1))
+		if contents ~= 0 then
+			return true
+		end
+	end
+
+	-- Ignore dropped items
+	local entClass = entity:GetClass()
+	if entClass == "CTFAmmoPack" or entClass == "CTFDroppedWeapon" then
+		return false
 	end
 
 	return true
@@ -1047,6 +878,16 @@ local function get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertic
 	end
 
 	return bestcorners
+end
+
+-- Scale a corner unit vector to actual distance (preserves AABB shape)
+-- Don't normalize! AABB corners are at (±dist, ±dist), diagonal stays diagonal
+local function scale_corner_to_distance(corner, dist)
+	return Vector3(
+		corner.x ~= 0 and (corner.x > 0 and dist or -dist) or 0,
+		corner.y ~= 0 and (corner.y > 0 and dist or -dist) or 0,
+		0
+	)
 end
 
 local BACKSTAB_MAX_YAW_DIFF = 180 -- Maximum allowable yaw difference for backstab
@@ -1497,30 +1338,6 @@ end
 
 -- Auto recharge state
 local LastWarpTime = 0
-local AutoRechargeQueued = false
-
--- Auto recharge logic - call this every tick
-local function HandleAutoRecharge()
-	if not Menu.Advanced.AutoRecharge then
-		return
-	end
-
-	local currentTime = globals.RealTime()
-	local chargedTicks = warp.GetChargedTicks() or 0
-
-	-- If warp not fully charged and we warped recently
-	if chargedTicks < 24 and LastWarpTime > 0 then
-		-- Get ping-based cooldown using Latency variable (already calculated)
-		local ping = Latency or 0 -- Latency in seconds
-		local cooldown = ping + 0.1 -- Ping + 100ms buffer
-
-		-- Wait for cooldown after warp before recharging
-		if currentTime - LastWarpTime > cooldown then
-			warp.TriggerCharge() -- Recharge warp
-			LastWarpTime = 0 -- Reset to avoid repeated triggers
-		end
-	end
-end
 
 -- On kill recharge - instant recharge on successful kill
 local function OnKillRecharge(event)
@@ -1579,50 +1396,27 @@ local function AutoWarp(cmd)
 			local enemy_pos = TargetPlayer.Pos
 			local enemyBackYaw = NormalizeYaw(PositionYaw(enemy_pos, enemy_pos + TargetPlayer.Back))
 
-			-- Get hitbox sizes - use combinedHitbox (NO buffer) for direction detection
+			-- Get hitbox sizes
 			local myMins, myMaxs = pLocal:GetMins(), pLocal:GetMaxs()
 			local myRadius = myMaxs.x
 			local enemyRadius = TargetPlayer.hitboxRadius or 24
-			local combinedHitbox = myRadius + enemyRadius -- NO buffer for direction
+			local combinedHitbox = myRadius + enemyRadius
 
 			-- Get velocity and speed for 2-pass wishdir calculation
 			local vel = pLocal:EstimateAbsVelocity()
 			local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
 
-			-- Direction detection uses EXACT combinedHitbox (NO buffer)
-			-- This tells us exactly where we are relative to enemy
-			local dx = enemy_pos.x - my_pos.x
-			local dy = enemy_pos.y - my_pos.y
-			local direction_x = ((dx > combinedHitbox) and 1 or 0) - ((dx < -combinedHitbox) and 1 or 0)
-			local direction_y = ((dy > combinedHitbox) and 1 or 0) - ((dy < -combinedHitbox) and 1 or 0)
-
-			-- Get corners from lookup table (index 2 = left, index 3 = right)
-			local cornerOptions = direction_to_corners[direction_x] and direction_to_corners[direction_x][direction_y]
-			if not cornerOptions or #cornerOptions < 3 then
-				cornerOptions = { center, Vector3(-1, 0, 0), Vector3(1, 0, 0) }
-			end
+			-- Use the proper helper function for direction detection (DRY)
+			local cornerOptions = get_best_corners_or_origin(my_pos, enemy_pos, combinedHitbox, 82)
 
 			-- Target points use combinedHitbox + 1 unit buffer (for collision safety)
-			-- Buffer ONLY affects where we walk to, NOT direction detection
-			local cornerDist = combinedHitbox + 1 -- Buffer for target points
+			local cornerDist = combinedHitbox + 1
 
-			-- CRITICAL: Don't normalize corners! AABB corners are at (±dist, ±dist)
-			-- Normalizing ruins the geometry - diagonal becomes shorter
-			-- Instead, scale each component to cornerDist
+			-- Get left/right corners and scale to distance (use helper for DRY)
 			local leftCorner = cornerOptions[2] or Vector3(-1, 0, 0)
 			local rightCorner = cornerOptions[3] or Vector3(1, 0, 0)
-
-			-- Scale to cornerDist per-component (preserves AABB shape)
-			local leftOffset = Vector3(
-				leftCorner.x ~= 0 and (leftCorner.x > 0 and cornerDist or -cornerDist) or 0,
-				leftCorner.y ~= 0 and (leftCorner.y > 0 and cornerDist or -cornerDist) or 0,
-				0
-			)
-			local rightOffset = Vector3(
-				rightCorner.x ~= 0 and (rightCorner.x > 0 and cornerDist or -cornerDist) or 0,
-				rightCorner.y ~= 0 and (rightCorner.y > 0 and cornerDist or -cornerDist) or 0,
-				0
-			)
+			local leftOffset = scale_corner_to_distance(leftCorner, cornerDist)
+			local rightOffset = scale_corner_to_distance(rightCorner, cornerDist)
 
 			-- DEPTH 2 scoring: simulate reaching first point, then find next optimal
 			-- This prevents getting stuck at left/right - continues circling to back
