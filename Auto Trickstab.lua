@@ -560,6 +560,40 @@ local function IsInRange(targetPos, spherePos, sphereRadius)
 	end
 end
 
+-- Check if we can physically attack from a position (LOS + range, extended grace range)
+-- Uses 128 range instead of 66 for grace margin
+local ATTACK_CHECK_RANGE = 128
+
+local function CanAttackFromPos(testPoint)
+	if not TargetPlayer or not TargetPlayer.Pos or not TargetPlayer.entity then
+		return false
+	end
+
+	local viewPos = testPoint + pLocalViewOffset
+	local enemyPos = TargetPlayer.Pos
+
+	-- Range check with extended grace (128 instead of 66)
+	local dist = (viewPos - enemyPos):Length()
+	if dist > ATTACK_CHECK_RANGE then
+		return false
+	end
+
+	-- LOS check: trace from our view position to enemy center
+	-- Use hull trace to account for player width
+	local losTrace = engine.TraceLine(viewPos, enemyPos + Vector3(0, 0, 40), MASK_SHOT)
+
+	-- Hit something before enemy?
+	if losTrace.fraction < 0.99 then
+		-- Check if we hit the target player
+		if losTrace.entity and losTrace.entity == TargetPlayer.entity then
+			return true -- Hit the enemy, LOS clear
+		end
+		return false -- Hit a wall or other obstacle
+	end
+
+	return true -- Clear LOS
+end
+
 local function CheckBackstab(testPoint)
 	-- Safety check: ensure TargetPlayer exists
 	if not TargetPlayer or not TargetPlayer.viewpos or not TargetPlayer.Back or not TargetPlayer.Pos then
@@ -576,6 +610,11 @@ local function CheckBackstab(testPoint)
 	end
 
 	return false
+end
+
+-- Combined check: can backstab AND can attack (LOS clear)
+local function CanBackstabFromPos(testPoint)
+	return CheckBackstab(testPoint) and CanAttackFromPos(testPoint)
 end
 
 -- Constants
@@ -800,8 +839,8 @@ local function SimulateDash(targetDirection, ticks)
 			break -- No point simulating further, we're stuck
 		end
 
-		-- Check for backstab possibility at the current position
-		local isBackstab = CheckBackstab(pos)
+		-- Check for backstab possibility at the current position (with LOS check)
+		local isBackstab = CanBackstabFromPos(pos)
 
 		-- Store each tick position and backstab status in LOCAL arrays
 		simPositions[i] = pos
@@ -1388,12 +1427,19 @@ local function AutoWarp(cmd)
 	local autoWalkTakesPriority = Menu.Main.AutoWalk and hasStabPoints
 
 	if Menu.Main.MoveAsistance and TargetPlayer and TargetPlayer.Pos and TargetPlayer.Back then
-		local canCurrentlyBackstab = CheckBackstab(pLocalPos)
+		local canCurrentlyBackstab = CanBackstabFromPos(pLocalPos)
 
 		-- MoveAssistance active when not backstabbing AND AutoWalk not taking priority
 		if not canCurrentlyBackstab and not autoWalkTakesPriority then
 			local my_pos = pLocalPos
 			local enemy_pos = TargetPlayer.Pos
+
+			-- VISIBILITY CHECK: Don't assist if wall between us and enemy
+			local losTrace = engine.TraceLine(pLocalViewPos, TargetPlayer.viewpos, MASK_SHOT)
+			if losTrace.fraction < 0.99 and losTrace.entity ~= TargetPlayer.entity then
+				-- Wall blocking LOS - don't waste time assisting
+				goto skip_assistance
+			end
 			local enemyBackYaw = NormalizeYaw(PositionYaw(enemy_pos, enemy_pos + TargetPlayer.Back))
 
 			-- Get hitbox sizes
@@ -1596,14 +1642,15 @@ local function AutoWarp(cmd)
 			WalkInDirection(cmd, wishdir, true) -- forceNoSnap = true
 		end
 	end
+	::skip_assistance::
 
 	-- Ensure we have a valid warp target position for AutoWalk and AutoWarp
 	if BackstabPos ~= emptyVec and minWarpTicks then
 		-- Check if we can CURRENTLY backstab (from our current position)
-		local canCurrentlyBackstab = CheckBackstab(pLocalPos)
+		local canCurrentlyBackstab = CanBackstabFromPos(pLocalPos)
 
-		-- Check if WARP would result in backstab (at BackstabPos)
-		local warpWouldBackstab = CheckBackstab(BackstabPos)
+		-- Check if WARP would result in backstab (at BackstabPos) - includes LOS check
+		local warpWouldBackstab = CanBackstabFromPos(BackstabPos)
 
 		-- Check if warp is ready
 		local warpReady = warp.CanWarp() and warp.GetChargedTicks() >= 23 and not warp.IsWarping()
