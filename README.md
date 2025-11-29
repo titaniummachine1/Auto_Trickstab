@@ -41,7 +41,7 @@ These two **must exist in your `lua/` folder** or the script will *not load*:
 
 ## 📸 Preview
 
-![Auto Trickstab Preview](https://github.com/titaniummachine1/Auto_Trickstab/assets/78664175/bf32fbb5-cb37-4c75-9c89-90be1c46bb68)
+https://github.com/user-attachments/assets/d0a8e074-a9ba-4b31-ad9f-facd144148fe
 
 ---
 
