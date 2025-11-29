@@ -93,6 +93,17 @@ local BACKSTAB_RANGE = 66 -- Hammer units
 local SV_GRAVITY = client.GetConVar("sv_gravity")
 local CL_INTERP = client.GetConVar("cl_interp")
 
+-- Ensure warp works without user binding dash key
+-- KEY_SCROLLLOCKTOGGLE (106) = impossible to accidentally press
+if gui.GetValue("dash move key") == 0 then
+	gui.SetValue("dash move key", 106)
+end
+
+-- Configure triggerbot for auto backstab: key=NONE, backstab=Rage, FOV=99
+gui.SetValue("trigger key", 0)
+gui.SetValue("auto backstab", 2)
+gui.SetValue("auto backstab fov", 99)
+
 -- Class max speeds (units per second) - from Swing Prediction
 local CLASS_MAX_SPEEDS = {
 	[1] = 400, -- Scout
@@ -560,38 +571,80 @@ local function IsInRange(targetPos, spherePos, sphereRadius)
 	end
 end
 
--- Check if we can physically attack from a position (LOS + range, extended grace range)
--- Uses 128 range instead of 66 for grace margin
-local ATTACK_CHECK_RANGE = 128
+-- Helper: check if entity is a teammate (blocks melee)
+local function IsTeammate(ent)
+	if not ent or not ent:IsValid() or not pLocal then
+		return false
+	end
+	if ent:GetClass() ~= "CTFPlayer" then
+		return false
+	end
+	if ent == pLocal then
+		return true
+	end -- Self is passthrough
+	return ent:GetTeamNumber() == pLocal:GetTeamNumber()
+end
 
+-- Proper melee can-hit check (same logic as A_Swing_Prediction)
+-- 1. AABB closest point to enemy hitbox
+-- 2. Distance check - can we even reach?
+-- 3. TraceLine to closest point at swing range
+-- 4. If miss → TraceHull with melee hull size
 local function CanAttackFromPos(testPoint)
 	if not TargetPlayer or not TargetPlayer.Pos or not TargetPlayer.entity then
 		return false
 	end
 
 	local viewPos = testPoint + pLocalViewOffset
-	local enemyPos = TargetPlayer.Pos
+	local targetPos = TargetPlayer.Pos
 
-	-- Range check with extended grace (128 instead of 66)
-	local dist = (viewPos - enemyPos):Length()
-	if dist > ATTACK_CHECK_RANGE then
+	-- AABB closest point calculation (same as A_Swing_Prediction)
+	local hitbox_min = targetPos + vHitbox.Min
+	local hitbox_max = targetPos + vHitbox.Max
+
+	local closestPoint = Vector3(
+		math.max(hitbox_min.x, math.min(viewPos.x, hitbox_max.x)),
+		math.max(hitbox_min.y, math.min(viewPos.y, hitbox_max.y)),
+		math.max(hitbox_min.z, math.min(viewPos.z, hitbox_max.z))
+	)
+
+	-- Distance from viewPos to closest point on hitbox
+	local distanceToHitbox = (viewPos - closestPoint):Length()
+
+	-- Can we even reach? (backstab range check)
+	if distanceToHitbox > BACKSTAB_RANGE then
 		return false
 	end
 
-	-- LOS check: trace from our view position to enemy center
-	-- Use hull trace to account for player width
-	local losTrace = engine.TraceLine(viewPos, enemyPos + Vector3(0, 0, 40), MASK_SHOT)
+	-- Calculate swing direction and end point
+	local dirToClosest = closestPoint - viewPos
+	local dirLen = dirToClosest:Length()
+	local direction = (dirLen > 0) and (dirToClosest / dirLen) or Vector3(1, 0, 0)
+	local swingEnd = viewPos + direction * BACKSTAB_RANGE
 
-	-- Hit something before enemy?
-	if losTrace.fraction < 0.99 then
-		-- Check if we hit the target player
-		if losTrace.entity and losTrace.entity == TargetPlayer.entity then
-			return true -- Hit the enemy, LOS clear
+	-- TraceLine first - if it hits anything, that's the final result
+	local trace = engine.TraceLine(viewPos, swingEnd, MASK_SHOT_HULL)
+	if trace.fraction < 1 then
+		-- Hit something - check what it is
+		if trace.entity == TargetPlayer.entity then
+			return true -- Hit target
+		else
+			return false -- Hit wall, teammate, or other obstacle
 		end
-		return false -- Hit a wall or other obstacle
 	end
 
-	return true -- Clear LOS
+	-- TraceLine hit nothing → try TraceHull (melee has hull)
+	trace = engine.TraceHull(viewPos, swingEnd, SwingHull.Min, SwingHull.Max, MASK_SHOT_HULL)
+	if trace.fraction < 1 then
+		-- Hit something with hull - check what it is
+		if trace.entity == TargetPlayer.entity then
+			return true -- Hit target
+		else
+			return false -- Hit wall, teammate, or other obstacle
+		end
+	end
+
+	return true -- Both traces hit nothing - clear path
 end
 
 local function CheckBackstab(testPoint)
@@ -1735,6 +1788,15 @@ local function OnCreateMove(cmd)
 		positions = {}
 		endwarps = {}
 		return
+	end
+
+	-- Angle snap mode requires user input to work (abuses player's own input for direction)
+	if Menu.Advanced.UseAngleSnap then
+		local fwd = cmd:GetForwardMove()
+		local side = cmd:GetSideMove()
+		if fwd == 0 and side == 0 then
+			return -- No user input, can't angle snap
+		end
 	end
 
 	-- Reset tables for storing positions and backstab states
