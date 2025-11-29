@@ -13,10 +13,7 @@ end
 assert(libLoaded, "lnxLib not found, please install it!")
 assert(lnxLib.GetVersion() >= 1.00, "lnxLib version is too old, please update it!")
 
--- Unload the module if it's already loaded
-if package.loaded["TimMenu"] then
-	package.loaded["TimMenu"] = nil
-end
+-- TimMenu should not be unloaded as other scripts may be using it
 
 local menuLoaded, TimMenu = pcall(require, "TimMenu")
 if not menuLoaded then
@@ -26,6 +23,10 @@ if not menuLoaded then
 end
 
 assert(menuLoaded, "TimMenu not found, please install it!")
+
+-- Safety check for lnxLib modules
+assert(lnxLib.Utils, "lnxLib.Utils not found!")
+assert(lnxLib.TF2, "lnxLib.TF2 not found!")
 
 local Math, Conversion = lnxLib.Utils.Math, lnxLib.Utils.Conversion
 local WPlayer, WWeapon = lnxLib.TF2.WPlayer, lnxLib.TF2.WWeapon
@@ -466,6 +467,7 @@ local function UpdateTarget()
 		if
 			player:IsAlive()
 			and not player:IsDormant()
+			and pLocal
 			and player:GetTeamNumber() ~= pLocal:GetTeamNumber()
 			and (ignoreinvisible == 1 and not player:InCond(4))
 		then
@@ -1233,13 +1235,18 @@ local function CalculateTrickstab(cmd)
 	local ourYawDeltaFromBack = math.abs(NormalizeYaw(ourYawToEnemy - enemyBackYaw))
 	local withinBackAngle = ourYawDeltaFromBack <= 90
 
+	-- STAIRSTAB CHECK: Height difference >= 82 units = only CENTER direction
+	-- When above/below enemy, left/right is useless - only center/back matters
+	local heightDiff = math.abs(my_pos.z - enemy_pos.z)
+	local isStairstab = heightDiff >= 82
+
 	-- Track if optimal side hit a wall (to decide if we need other_side)
 	local optimalHitWall = false
 
-	-- Path 1: Optimal side (always simulate - best yaw to back)
-	if optimalSidePos then
+	-- Path 1: Optimal side (only simulate if NOT stairstab)
+	if not isStairstab and optimalSidePos then
 		table.insert(simulationTargets, { name = "optimal_side", offset = optimalSidePos })
-	else
+	elseif not isStairstab and not optimalSidePos then
 		print("ERROR: No optimal side position found!")
 	end
 
@@ -1301,38 +1308,50 @@ local function CalculateTrickstab(cmd)
 		end
 	end
 
-	-- First simulate optimal side to check if it hits a wall
-	local optimalPath, optimalEndwarps, optimalWishdir, optimalHitWall
-	if optimalSidePos then
-		optimalPath, optimalEndwarps, optimalWishdir, optimalHitWall = SimulatePath(simulationTargets[1])
-		table.insert(allPaths, optimalPath)
-		table.insert(allEndwarps, optimalEndwarps)
-		-- Score the optimal path
-		ScoreEndwarps(optimalEndwarps, optimalWishdir * 100)
-	end
-
-	-- Path 2: Other side - show if optimal hit a wall OR within 90° of back
-	-- This helps assistance pick the path with more open space
-	if otherSidePos and (optimalHitWall or withinBackAngle) then
-		table.insert(simulationTargets, { name = "other_side", offset = otherSidePos })
-	end
-
-	-- Path 3: Center/back - ONLY if within 90° of back
-	if withinBackAngle then
+	-- STAIRSTAB: Only simulate center path (skip left/right entirely)
+	if isStairstab then
+		-- Add center as the only target
 		table.insert(simulationTargets, { name = "center", offset = center })
-	end
 
-	-- Simulate remaining paths (skip first which we already did)
-	for i = 2, #simulationTargets do
-		local simTarget = simulationTargets[i]
-		local simPath, simEndwarps, wishdir, hitWall = SimulatePath(simTarget)
+		-- Simulate the center path
+		local centerPath, centerEndwarps, centerWishdir, centerHitWall = SimulatePath(simulationTargets[1])
+		table.insert(allPaths, centerPath)
+		table.insert(allEndwarps, centerEndwarps)
+		ScoreEndwarps(centerEndwarps, centerWishdir * 100)
+	else
+		-- NORMAL: First simulate optimal side to check if it hits a wall
+		local optimalPath, optimalEndwarps, optimalWishdir, optimalHitWall
+		if optimalSidePos and #simulationTargets > 0 then
+			optimalPath, optimalEndwarps, optimalWishdir, optimalHitWall = SimulatePath(simulationTargets[1])
+			table.insert(allPaths, optimalPath)
+			table.insert(allEndwarps, optimalEndwarps)
+			-- Score the optimal path
+			ScoreEndwarps(optimalEndwarps, optimalWishdir * 100)
+		end
 
-		-- Store this simulation path for visualization
-		table.insert(allPaths, simPath)
-		table.insert(allEndwarps, simEndwarps)
+		-- Path 2: Other side - show if optimal hit a wall OR within 90° of back
+		-- This helps assistance pick the path with more open space
+		if otherSidePos and (optimalHitWall or withinBackAngle) then
+			table.insert(simulationTargets, { name = "other_side", offset = otherSidePos })
+		end
 
-		-- Score this path
-		ScoreEndwarps(simEndwarps, wishdir * 100)
+		-- Path 3: Center/back - if within 90° of back
+		if withinBackAngle then
+			table.insert(simulationTargets, { name = "center", offset = center })
+		end
+
+		-- Simulate remaining paths (skip first which we already did)
+		for i = 2, #simulationTargets do
+			local simTarget = simulationTargets[i]
+			local simPath, simEndwarps, wishdir, hitWall = SimulatePath(simTarget)
+
+			-- Store this simulation path for visualization
+			table.insert(allPaths, simPath)
+			table.insert(allEndwarps, simEndwarps)
+
+			-- Score this path
+			ScoreEndwarps(simEndwarps, wishdir * 100)
+		end
 	end
 
 	-- Set global visualization data to show ALL paths (not just best one)
@@ -1341,8 +1360,13 @@ local function CalculateTrickstab(cmd)
 
 	-- Only set fallback direction if we found at least some backstab points
 	-- If no backstab points at all, leave bestDirection nil so MoveAssistance uses simple approach
-	if not bestDirection and optimalSidePos and totalBackstabPoints > 0 then
-		bestDirection = enemy_pos + optimalSidePos - my_pos
+	if not bestDirection and totalBackstabPoints > 0 then
+		if isStairstab then
+			-- Stairstab: fallback to center/back direction
+			bestDirection = enemy_pos + TargetPlayer.Back * (myRadius + enemyRadius + 1) - my_pos
+		elseif optimalSidePos then
+			bestDirection = enemy_pos + optimalSidePos - my_pos
+		end
 	end
 
 	-- Debug: Path count validation
@@ -1493,6 +1517,11 @@ local function AutoWarp(cmd)
 				-- Wall blocking LOS - don't waste time assisting
 				goto skip_assistance
 			end
+
+			-- STAIRSTAB CHECK: Height diff >= 82 = only CENTER direction
+			local heightDiff = math.abs(my_pos.z - enemy_pos.z)
+			local isStairstab = heightDiff >= 82
+
 			local enemyBackYaw = NormalizeYaw(PositionYaw(enemy_pos, enemy_pos + TargetPlayer.Back))
 
 			-- Get hitbox sizes
@@ -1663,8 +1692,20 @@ local function AutoWarp(cmd)
 			local wishdir
 			local userSideMove = cmd:GetSideMove()
 
+			-- STAIRSTAB OVERRIDE: Force center when height diff >= 82 units
+			if isStairstab then
+				-- Stairstab - only center direction makes sense
+				if centerWishdir then
+					wishdir = centerWishdir
+				else
+					-- Fallback: calculate center wishdir if not computed yet
+					local backDir = Normalize(TargetPlayer.Back)
+					local centerOffset = backDir * (combinedHitbox + 1)
+					wishdir =
+						CalculateOptimalWishdir(my_pos, vel, centerOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
+				end
 			-- Manual override: TF2 sidemove: positive = right (D key), negative = left (A key)
-			if Menu.Advanced.ManualDirection then
+			elseif Menu.Advanced.ManualDirection then
 				if userSideMove >= 400 then
 					wishdir = rightWishdir
 				elseif userSideMove <= -400 then
