@@ -2213,29 +2213,7 @@ local function doDraw()
 
 	-----------------------------------------------------------------------------------------------------
 	--Menu
-	-- Initialize visibility state
-	if Menu._menuVisible == nil then
-		Menu._menuVisible = true
-	end
-
-	-- Only draw when the Lmaobox menu is open
-	if not gui.IsMenuOpen() then
-		-- Keep menu visible but don't process content when Lmaobox menu is closed
-		-- This maintains position while preventing interaction
-		if Menu._menuVisible then
-			Menu._menuVisible = false
-		end
-		-- Still call Begin with false to maintain window state but hide content
-		TimMenu.Begin("Auto Trickstab", false)
-		return
-	end
-
-	-- Show menu when Lmaobox menu is open
-	if not Menu._menuVisible then
-		Menu._menuVisible = true
-	end
-
-	if TimMenu and TimMenu.Begin("Auto Trickstab", Menu._menuVisible) then
+	if TimMenu and TimMenu.Begin("Auto Trickstab", gui.IsMenuOpen()) then
 		local tabs = { "Main", "Advanced", "Visuals" }
 		Menu.currentTab = TimMenu.TabControl("tabs", tabs, Menu.currentTab)
 		TimMenu.NextLine()
