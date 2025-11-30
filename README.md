@@ -121,14 +121,4 @@ MIT License — see LICENSE.
 ## 📘 Changelog (high level)
 
 * **v1.0** — First release: warp+stab logic, config system.
-
----
-
-If you want, I can also:
-
-✅ generate a **clean badge row** with more metrics (stars, forks, last commit, code size)
-✅ prepare a **commit-ready PR patch**
-✅ restructure the repo to look like a professional Lua project
-✅ add icons, video previews, GIFs, or a features comparison chart
-
-Just tell me what style you want — brutal minimal, flashy GitHub-pro, or ultra-organized dev-friendly.
+* 
