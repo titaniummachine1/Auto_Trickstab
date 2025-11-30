@@ -229,28 +229,56 @@ local status, loadedMenu = pcall(function()
 	return assert(LoadCFG(string.format([[Lua %s]], Lua__fileName)))
 end) -- Auto-load config
 
--- Function to check if all expected functions exist in the loaded config
-local function checkAllFunctionsExist(expectedMenu, loadedMenu)
-	for key, value in pairs(expectedMenu) do
-		if type(value) == "function" then
-			-- Check if the function exists in the loaded menu and has the correct type
-			if not loadedMenu[key] or type(loadedMenu[key]) ~= "function" then
+-- Function to check if all expected keys and structure exist in the loaded config
+local function checkConfigStructure(expectedMenu, loadedMenu)
+	-- First check: ensure loaded config has ONLY the expected keys (no extra keys)
+	for key, _ in pairs(loadedMenu) do
+		if expectedMenu[key] == nil then
+			print(string.format("Unexpected key in config: %s", key))
+			return false
+		end
+	end
+
+	-- Second check: ensure all expected keys exist with correct types
+	for key, expectedValue in pairs(expectedMenu) do
+		local loadedValue = loadedMenu[key]
+
+		-- Check if key exists
+		if loadedValue == nil then
+			print(string.format("Missing key in config: %s", key))
+			return false
+		end
+
+		-- Check if type matches
+		if type(loadedValue) ~= type(expectedValue) then
+			print(
+				string.format(
+					"Type mismatch for key %s: expected %s, got %s",
+					key,
+					type(expectedValue),
+					type(loadedValue)
+				)
+			)
+			return false
+		end
+
+		-- Recursively check nested tables
+		if type(expectedValue) == "table" and type(loadedValue) == "table" then
+			if not checkConfigStructure(expectedValue, loadedValue) then
 				return false
 			end
 		end
 	end
-	for key, value in pairs(expectedMenu) do
-		if not loadedMenu[key] or type(loadedMenu[key]) ~= type(value) then
-			return false
-		end
-	end
+
 	return true
 end
 
 -- Execute this block only if loading the config was successful
+-- loadedMenu is defined in local scope at line 228 - lint warning is false positive
 if status then
-	if checkAllFunctionsExist(Menu, loadedMenu) and not input.IsButtonDown(KEY_LSHIFT) then
+	if checkConfigStructure(Menu, loadedMenu) and not input.IsButtonDown(KEY_LSHIFT) then
 		Menu = loadedMenu
+		print("Config loaded successfully")
 	else
 		print("Config is outdated or invalid. Creating a new config.")
 		CreateCFG(string.format([[Lua %s]], Lua__fileName), Menu) -- Save the config
@@ -445,6 +473,7 @@ local function UpdateLocalPlayerCache()
 	end
 
 	--cachedLoadoutSlot2 = pLocal and pLocal:GetEntityForLoadoutSlot(2) or nil
+	-- pLocal is guaranteed non-nil after checks above (lines 455-464) - lint warning is false positive
 	pLocalViewOffset = pLocal:GetPropVector("localdata", "m_vecViewOffset[0]")
 	pLocalPos = pLocal:GetAbsOrigin()
 	pLocalViewPos = pLocal and (pLocal:GetAbsOrigin() + pLocalViewOffset) or pLocalPos or emptyVec
