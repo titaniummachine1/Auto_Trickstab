@@ -35,8 +35,6 @@ local Prediction = lnxLib.TF2.Prediction
 
 local Menu = { -- this is the config that will be loaded every time u load the script
 
-	Version = 3.0, -- dont touch this, this is just for managing the config version
-
 	currentTab = 1,
 	tabs = { -- dont touch this, this is just for managing the tabs in the menu
 		Main = true,
@@ -78,17 +76,96 @@ local Menu = { -- this is the config that will be loaded every time u load the s
 local pLocal = entities.GetLocalPlayer() or nil
 local emptyVec = Vector3(0, 0, 0)
 
+-- Game Constants (TF2 specific) - MUST be defined before use
+local TF2 = {
+	-- Melee combat
+	BACKSTAB_RANGE = 66, -- Hammer units for knife reach
+	BACKSTAB_ANGLE = 90, -- Degrees for valid backstab
+	SWING_HULL_SIZE = 38, -- Melee swing detection hull
+
+	-- Player dimensions
+	HITBOX_RADIUS = 24, -- Player collision radius
+	HITBOX_HEIGHT = 82, -- Player height
+	VIEW_OFFSET_Z = 75, -- Eye level from ground
+
+	-- Movement & physics
+	MAX_SPEED = 320, -- Base movement speed
+	ACCELERATION = 10, -- Ground acceleration
+	GROUND_FRICTION = 4.0, -- Friction coefficient
+	STOP_SPEED = 100, -- Speed at which friction stops
+
+	-- Warp mechanics
+	WARP_READY_TICKS = 23, -- Minimum ticks for warp charge
+	AUTO_RECHARGE_THRESHOLD = 24, -- Ticks before auto-recharge
+	TARGET_EXTENSION = 450, -- Extension distance for pathfinding
+
+	-- Collision angles
+	FORWARD_COLLISION_ANGLE = 55, -- Wall collision angle
+	GROUND_ANGLE_LOW = 45, -- Ground collision low angle
+	GROUND_ANGLE_HIGH = 55, -- Ground collision high angle
+
+	-- Scoring & thresholds
+	MIN_BACKSTAB_POINTS = 3, -- Minimum points for valid path
+	STAIRSTAB_HEIGHT = 82, -- Height threshold for stairstabs
+	ATTACK_RANGE = 225, -- Attack range plus warp distance
+	MAX_SCORE_DISTANCE = 120, -- Distance for scoring calculations
+	YAW_WEIGHT = 0.7, -- Weight for yaw component in scoring
+	DISTANCE_WEIGHT = 0.3, -- Weight for distance component in scoring
+
+	-- Ping & cooldowns
+	MIN_PING_COOLDOWN = 7, -- Minimum ping cooldown ticks
+	PING_BUFFER_TICKS = 5, -- Buffer ticks for ping cooldown
+
+	-- Manual control
+	MANUAL_THRESHOLD = 100, -- Threshold for manual direction input
+
+	-- TF2 Classes
+	SPY = 8, -- Spy class ID
+
+	-- Speed thresholds
+	STUCK_SPEED_THRESHOLD = 10, -- Speed threshold for stuck detection
+
+	-- Command speeds
+	MAX_CMD_SPEED = 400, -- Maximum command movement speed
+}
+
+-- Math constants (precomputed)
+local MATH = {
+	TWO_PI = 2 * math.pi,
+	DEG_TO_RAD = math.pi / 180,
+	RAD_TO_DEG = 180 / math.pi,
+	HALF_CIRCLE = 180,
+	FULL_CIRCLE = 360,
+}
+
+-- Hull dimensions (precomputed)
+local HULL = {
+	MIN = Vector3(-23.99, -23.99, 0),
+	MAX = Vector3(23.99, 23.99, 82),
+	SWING_MIN = Vector3(-19, -19, -19), -- Half of 38
+	SWING_MAX = Vector3(19, 19, 19),
+}
+
+-- Class speed mappings
+local CLASS_MAX_SPEEDS = {
+	[1] = 400, -- Scout
+	[2] = 300, -- Sniper
+	[3] = 240, -- Soldier
+	[4] = 280, -- Demoman
+	[5] = 320, -- Medic
+	[6] = 280, -- Heavy
+	[7] = 300, -- Pyro
+	[8] = 320, -- Spy
+	[9] = 320, -- Engineer
+}
+
 local pLocalPos = emptyVec
 local pLocalViewPos = emptyVec
-local pLocalViewOffset = Vector3(0, 0, 75)
-local vHitbox = { Min = Vector3(-23.99, -23.99, 0), Max = Vector3(23.99, 23.99, 82) }
+local pLocalViewOffset = Vector3(0, 0, TF2.VIEW_OFFSET_Z)
 
 local TargetPlayer = {}
 local endwarps = {}
 local debugCornerData = {} -- Debug info for corner visualization
-
--- Constants
-local BACKSTAB_RANGE = 66 -- Hammer units
 
 -- Cache ConVars for performance (accessed frequently)
 local SV_GRAVITY = client.GetConVar("sv_gravity")
@@ -104,19 +181,6 @@ end
 gui.SetValue("trigger key", 0)
 gui.SetValue("auto backstab", 2)
 gui.SetValue("auto backstab fov", 99)
-
--- Class max speeds (units per second) - from Swing Prediction
-local CLASS_MAX_SPEEDS = {
-	[1] = 400, -- Scout
-	[2] = 240, -- Sniper
-	[3] = 240, -- Soldier
-	[4] = 280, -- Demoman
-	[5] = 230, -- Medic
-	[6] = 300, -- Heavy
-	[7] = 240, -- Pyro
-	[8] = 320, -- Spy
-	[9] = 320, -- Engineer
-}
 
 -- Keybind state tracking
 local previousKeyState = false
@@ -294,13 +358,13 @@ local function Normalize(vec)
 	return vec / vec:Length()
 end
 
--- Normalize a yaw angle to the range [-180, 180]
+-- Normalize angle to [-180, 180] range
 local function NormalizeYaw(yaw)
-	yaw = yaw % 360
-	if yaw > 180 then
-		yaw = yaw - 360
-	elseif yaw < -180 then
-		yaw = yaw + 360
+	yaw = yaw % MATH.FULL_CIRCLE
+	if yaw > MATH.HALF_CIRCLE then
+		yaw = yaw - MATH.FULL_CIRCLE
+	elseif yaw < -MATH.HALF_CIRCLE then
+		yaw = yaw + MATH.FULL_CIRCLE
 	end
 	return yaw
 end
@@ -310,7 +374,7 @@ local function PositionYaw(source, dest)
 	return math.deg(math.atan(delta.y, delta.x))
 end
 
--- Returns pitch and yaw angles from source looking at dest
+-- Calculate angles from source to target
 local function PositionAngles(source, dest)
 	local delta = dest - source
 	local dist = math.sqrt(delta.x * delta.x + delta.y * delta.y)
@@ -319,41 +383,33 @@ local function PositionAngles(source, dest)
 	return { pitch = pitch, yaw = yaw }
 end
 
--- TF2 Physics Constants for velocity simulation
-local TF2_GROUND_FRICTION = 4.0
-local TF2_STOPSPEED = 100
-local TF2_ACCEL = 10 -- Ground acceleration
-
-local MAX_SPEED = 320 -- Maximum speed
-
 -- Apply ground friction to velocity
 local function ApplyFriction(velocity, onGround)
-	if not onGround then
-		return velocity
+	if not velocity or not onGround then
+		return velocity or Vector3(0, 0, 0)
 	end
 
 	local speed = velocity:Length()
-	if speed < 0.1 then
+	if speed < TF2.STOP_SPEED then
 		return Vector3(0, 0, 0)
 	end
 
-	local drop = 0
-	local control = math.max(speed, TF2_STOPSPEED)
-	drop = control * TF2_GROUND_FRICTION * globals.TickInterval()
+	local friction = TF2.GROUND_FRICTION * globals.TickInterval()
+	local control = (speed < TF2.STOP_SPEED) and TF2.STOP_SPEED or speed
+	local drop = control * friction
 
-	local newSpeed = math.max(0, speed - drop)
-	if newSpeed ~= speed then
-		newSpeed = newSpeed / speed
-		return velocity * newSpeed
+	local newspeed = speed - drop
+	if newspeed < 0 then
+		newspeed = 0
+	end
+
+	if newspeed < speed then
+		local scale = newspeed / speed
+		return velocity * scale
 	end
 
 	return velocity
 end
-
--- Constants for movement
-local MAX_CMD_SPEED = 450
-local TWO_PI = 2 * math.pi
-local DEG_TO_RAD = math.pi / 180
 
 -- Walk in a specific direction relative to view angles
 -- Two methods: angle snapping (works now) or smooth rotation (needs lbox fix)
@@ -399,14 +455,9 @@ local function WalkInDirection(cmd, direction, forceNoSnap)
 		-- So: viewYaw = targetYaw - inputAngle
 		local desiredViewYaw = targetYaw - inputAngle
 
-		-- Convert to degrees and normalize to -180 to 180
-		desiredViewYaw = desiredViewYaw * (180 / math.pi)
-		desiredViewYaw = desiredViewYaw % 360
-		if desiredViewYaw > 180 then
-			desiredViewYaw = desiredViewYaw - 360
-		elseif desiredViewYaw < -180 then
-			desiredViewYaw = desiredViewYaw + 360
-		end
+		-- Convert to degrees and normalize
+		desiredViewYaw = desiredViewYaw * MATH.RAD_TO_DEG
+		desiredViewYaw = NormalizeYaw(desiredViewYaw)
 
 		-- Get current view angles
 		local viewAngles = engine.GetViewAngles()
@@ -418,20 +469,19 @@ local function WalkInDirection(cmd, direction, forceNoSnap)
 		-- Keep player's input unchanged (they might be walking backward/diagonal)
 		-- The view rotation will make their input go in the right direction!
 	else
-		-- METHOD 2: Smooth rotation without angle snap (NEEDS LBOX FIX)
 		-- Calculate target yaw from direction vector
-		local targetYaw = (math.atan(dy, dx) + TWO_PI) % TWO_PI
+		local targetYaw = (math.atan(dy, dx) + MATH.TWO_PI) % MATH.TWO_PI
 
 		-- Get current view yaw
 		local _, currentYaw = cmd:GetViewAngles()
-		currentYaw = currentYaw * DEG_TO_RAD
+		currentYaw = currentYaw * MATH.DEG_TO_RAD
 
-		-- Calculate difference
-		local yawDiff = (targetYaw - currentYaw + math.pi) % TWO_PI - math.pi
+		-- Calculate angle difference
+		local yawDiff = (targetYaw - currentYaw + math.pi) % MATH.TWO_PI - math.pi
 
-		-- Calculate forward and side move
-		local forward = math.cos(yawDiff) * MAX_CMD_SPEED
-		local side = math.sin(-yawDiff) * MAX_CMD_SPEED
+		-- Calculate movement input
+		local forward = math.cos(yawDiff) * TF2.MAX_CMD_SPEED
+		local side = math.sin(-yawDiff) * TF2.MAX_CMD_SPEED
 
 		cmd:SetForwardMove(forward)
 		cmd:SetSideMove(side)
@@ -447,7 +497,7 @@ function IsReadyToAttack(cmd, weapon)
 	local NextAttackTick = Conversion.Time_to_Ticks(weapon:GetPropFloat("m_flNextPrimaryAttack") or 0)
 
 	-- Check if the weapon's next attack time is less than or equal to the current tick
-	if NextAttackTick <= TickCount and warp.CanDoubleTap(weapon) then
+	if NextAttackTick <= TickCount then
 		LastAttackTick = TickCount -- Update the last attack tick
 		CanAttackNow = true -- Set flag for readiness
 		return true -- Ready to attack this tick
@@ -458,12 +508,13 @@ function IsReadyToAttack(cmd, weapon)
 end
 
 local positions = {}
+local pathHitWall = {} -- Track which paths hit walls (for red color visualization)
 -- Function to update the cache for the local player and loadout slot
 local function UpdateLocalPlayerCache()
 	pLocal = entities.GetLocalPlayer()
 	if
 		not pLocal
-		or pLocal:GetPropInt("m_iClass") ~= TF2_Spy
+		or pLocal:GetPropInt("m_iClass") ~= TF2.SPY
 		or not pLocal:IsAlive()
 		or pLocal:InCond(TFCond_Cloaked)
 		or pLocal:InCond(TFCond_CloakFlicker)
@@ -486,61 +537,139 @@ local function UpdateLocalPlayerCache()
 end
 
 local function UpdateTarget()
+	-- Safety check: ensure pLocal exists
+	if not pLocal or not pLocal:IsValid() then
+		return nil
+	end
+
 	local allPlayers = entities.FindByClass("CTFPlayer")
+	if not allPlayers then
+		return nil
+	end
+
 	local bestTargetDetails = nil
-	local maxAttackDistance = 225 -- Attack range plus warp distance
-	local bestDistance = maxAttackDistance + 1 -- Initialize to a large number
+	local bestScore = -math.huge
+	local maxAttackDistance = TF2.ATTACK_RANGE
 	local ignoreinvisible = (gui.GetValue("ignore cloaked"))
 
 	for _, player in pairs(allPlayers) do
-		if
-			player:IsAlive()
-			and not player:IsDormant()
-			and pLocal
-			and player:GetTeamNumber() ~= pLocal:GetTeamNumber()
-			and (ignoreinvisible == 1 and not player:InCond(4))
-		then
-			local playerPos = player:GetAbsOrigin()
-			local distance = (pLocalPos - playerPos):Length()
-			local viewAngles = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]") -- Fetching eye angles directly
-
-			-- Nil check for viewAngles
-			if not viewAngles then
-				goto continue -- Skip this player if viewAngles is nil
-			end
-
-			local viewYaw = EulerAngles(viewAngles:Unpack()).yaw or 0
-
-			-- Check if the player is within the attack range
-			if distance < maxAttackDistance and distance < bestDistance then
-				bestDistance = distance
-				local viewoffset = player:GetPropVector("localdata", "m_vecViewOffset[0]")
-				-- Nil check for viewoffset
-				if not viewoffset then
-					goto continue
-				end
-
-				-- Get hitbox directly from entity - handles ducking, etc. automatically
-				local mins, maxs = player:GetMins(), player:GetMaxs()
-				local hitboxRadius = maxs.x -- Horizontal radius (x and y are same)
-				local hitboxHeight = maxs.z -- Vertical height
-
-				bestTargetDetails = {
-					entity = player,
-					Pos = playerPos,
-					NextPos = playerPos + player:EstimateAbsVelocity() * globals.TickInterval(),
-					viewpos = playerPos + viewoffset,
-					viewYaw = viewYaw, -- Include yaw for backstab calculations
-					Back = -EulerAngles(viewAngles:Unpack()):Forward(), -- Ensure Back is accurate
-					hitboxRadius = hitboxRadius, -- Real-time hitbox radius from game
-					hitboxHeight = hitboxHeight, -- Real-time hitbox height from game
-					mins = mins, -- Store full mins for reference
-					maxs = maxs, -- Store full maxs for reference
-				}
-			end
-
-			::continue::
+		-- Basic validity checks
+		if not player or not player:IsValid() then
+			goto continue
 		end
+
+		-- Check if player is valid target
+		if not player:IsAlive() or player:IsDormant() then
+			goto continue
+		end
+
+		-- Check team (not on our team)
+		local playerTeam = player:GetTeamNumber()
+		local localTeam = pLocal:GetTeamNumber()
+		if not playerTeam or not localTeam or playerTeam == localTeam then
+			goto continue
+		end
+
+		-- Cloaked player check
+		if ignoreinvisible == 1 and player:InCond(TFCond_Cloaked) then
+			goto continue
+		end
+
+		-- Get player position safely
+		local playerPos = player:GetAbsOrigin()
+		if not playerPos then
+			goto continue
+		end
+
+		-- Calculate distance
+		local distance = (pLocalPos - playerPos):Length()
+
+		-- Skip if too far
+		if distance >= maxAttackDistance then
+			goto continue
+		end
+
+		-- Get view angles with nil check
+		local viewAngles = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]")
+		if not viewAngles then
+			goto continue
+		end
+
+		-- Safe yaw extraction
+		local viewYaw = 0
+		local success, angles = pcall(function()
+			return EulerAngles(viewAngles:Unpack())
+		end)
+		if success and angles and angles.yaw then
+			viewYaw = angles.yaw
+		else
+			goto continue
+		end
+
+		-- Calculate back direction for scoring
+		local backDir = Vector3(-1, 0, 0)
+		local successBack, anglesBack = pcall(function()
+			return EulerAngles(viewAngles:Unpack())
+		end)
+		if successBack and anglesBack then
+			backDir = -anglesBack:Forward()
+		end
+
+		-- Calculate yaw difference from enemy's back (0 = perfect backstab angle, 180 = facing)
+		local enemyBackYaw = math.deg(math.atan(backDir.y, backDir.x))
+		local ourYawToEnemy = math.deg(math.atan(playerPos.y - pLocalPos.y, playerPos.x - pLocalPos.x))
+		local yawDeltaFromBack = math.abs(NormalizeYaw(ourYawToEnemy - enemyBackYaw))
+
+		-- SCORING: Higher = better target
+		-- Distance score: closer = higher (max at 0, 0 at max range)
+		local distanceScore = (1 - distance / maxAttackDistance) * 100 -- 0-100
+
+		-- Angle score: smaller yaw delta from back = higher (180 = 0 score, 0 = 100 score)
+		local angleScore = (1 - yawDeltaFromBack / 180) * 100 -- 0-100
+
+		-- Combined score: 40% distance + 60% angle (prefer easier backstab over closer)
+		local targetScore = distanceScore * 0.4 + angleScore * 0.6
+
+		if targetScore > bestScore then
+			bestScore = targetScore
+
+			-- Get view offset with nil check
+			local viewoffset = player:GetPropVector("localdata", "m_vecViewOffset[0]")
+			if not viewoffset then
+				goto continue
+			end
+
+			-- Get hitbox dimensions
+			local mins, maxs = player:GetMins(), player:GetMaxs()
+			if not mins or not maxs then
+				goto continue
+			end
+
+			local hitboxRadius = maxs.x
+			local hitboxHeight = maxs.z
+
+			-- Get velocity safely
+			local velocity = player:EstimateAbsVelocity()
+			if not velocity then
+				velocity = Vector3(0, 0, 0)
+			end
+
+			bestTargetDetails = {
+				entity = player,
+				Pos = playerPos,
+				NextPos = playerPos + velocity * globals.TickInterval(),
+				viewpos = playerPos + viewoffset,
+				viewYaw = viewYaw,
+				Back = backDir,
+				hitboxRadius = hitboxRadius,
+				hitboxHeight = hitboxHeight,
+				mins = mins,
+				maxs = maxs,
+				score = targetScore, -- Store score for debug
+			}
+		end
+
+		::continue::
 	end
 
 	return bestTargetDetails
@@ -548,58 +677,45 @@ end
 
 local function CheckYawDelta(angle1, angle2)
 	local difference = NormalizeYaw(angle1 - angle2)
-	return (difference > 0 and difference < 89) or (difference < 0 and difference > -89)
+	return (difference > 0 and difference < (TF2.BACKSTAB_ANGLE - 1))
+		or (difference < 0 and difference > -(TF2.BACKSTAB_ANGLE - 1))
 end
 
-local SwingHullSize = 38
-local SwingHalfhullSize = SwingHullSize / 2
-local SwingHull = {
-	Min = Vector3(-SwingHalfhullSize, -SwingHalfhullSize, -SwingHalfhullSize),
-	Max = Vector3(SwingHalfhullSize, SwingHalfhullSize, SwingHalfhullSize),
-}
-
--- Function to check if target is in range
+-- Check if target is in backstab range
 local function IsInRange(targetPos, spherePos, sphereRadius)
-	local hitbox_min_trigger = targetPos + vHitbox.Min
-	local hitbox_max_trigger = targetPos + vHitbox.Max
+	local hitbox_min = targetPos + HULL.MIN
+	local hitbox_max = targetPos + HULL.MAX
 
-	-- Calculate the closest point on the hitbox to the sphere
+	-- Find closest point on hitbox to sphere center
 	local closestPoint = Vector3(
-		math.max(hitbox_min_trigger.x, math.min(spherePos.x, hitbox_max_trigger.x)),
-		math.max(hitbox_min_trigger.y, math.min(spherePos.y, hitbox_max_trigger.y)),
-		math.max(hitbox_min_trigger.z, math.min(spherePos.z, hitbox_max_trigger.z))
+		math.max(hitbox_min.x, math.min(spherePos.x, hitbox_max.x)),
+		math.max(hitbox_min.y, math.min(spherePos.y, hitbox_max.y)),
+		math.max(hitbox_min.z, math.min(spherePos.z, hitbox_max.z))
 	)
 
-	-- Calculate the squared distance from the closest point to the sphere center
+	-- Check if within sphere radius
 	local distanceSquared = (spherePos - closestPoint):LengthSqr()
-
-	-- Check if the target is within the sphere radius squared
 	if sphereRadius * sphereRadius > distanceSquared then
-		-- Calculate the direction from spherePos to closestPoint (safe normalize)
+		-- Calculate direction for trace
 		local dirVec = closestPoint - spherePos
 		local dirLen = dirVec:Length()
-		local direction = (dirLen > 0) and (dirVec / dirLen) or Vector3(1, 0, 0) -- Default forward if overlapping
-		local SwingtraceEnd = spherePos + direction * sphereRadius
+		local direction = (dirLen > 0) and (dirVec / dirLen) or Vector3(1, 0, 0)
+		local swingTraceEnd = spherePos + direction * sphereRadius
 
 		if Menu.Advanced.AdvancedPred then
-			local trace = engine.TraceLine(spherePos, SwingtraceEnd, MASK_SHOT_HULL)
+			local trace = engine.TraceLine(spherePos, swingTraceEnd, MASK_SHOT_HULL)
 			if trace.entity == TargetPlayer.entity then
 				return true, closestPoint
 			else
-				trace = engine.TraceHull(spherePos, SwingtraceEnd, SwingHull.Min, SwingHull.Max, MASK_SHOT_HULL)
-				if trace.entity == TargetPlayer.entity then
-					return true, closestPoint
-				else
-					return false, nil
-				end
+				trace = engine.TraceHull(spherePos, swingTraceEnd, HULL.SWING_MIN, HULL.SWING_MAX, MASK_SHOT_HULL)
+				return trace.entity == TargetPlayer.entity, closestPoint
 			end
 		end
 
 		return true, closestPoint
-	else
-		-- Target is not in range
-		return false, nil
 	end
+
+	return false, nil
 end
 
 -- Helper: check if entity is a teammate (blocks melee)
@@ -616,11 +732,7 @@ local function IsTeammate(ent)
 	return ent:GetTeamNumber() == pLocal:GetTeamNumber()
 end
 
--- Proper melee can-hit check (same logic as A_Swing_Prediction)
--- 1. AABB closest point to enemy hitbox
--- 2. Distance check - can we even reach?
--- 3. TraceLine to closest point at swing range
--- 4. If miss → TraceHull with melee hull size
+-- Check if can attack from position (LOS + range)
 local function CanAttackFromPos(testPoint)
 	if not TargetPlayer or not TargetPlayer.Pos or not TargetPlayer.entity then
 		return false
@@ -629,93 +741,77 @@ local function CanAttackFromPos(testPoint)
 	local viewPos = testPoint + pLocalViewOffset
 	local targetPos = TargetPlayer.Pos
 
-	-- AABB closest point calculation (same as A_Swing_Prediction)
-	local hitbox_min = targetPos + vHitbox.Min
-	local hitbox_max = targetPos + vHitbox.Max
-
+	-- Calculate closest point on target hitbox
+	local hitbox_min = targetPos + HULL.MIN
+	local hitbox_max = targetPos + HULL.MAX
 	local closestPoint = Vector3(
 		math.max(hitbox_min.x, math.min(viewPos.x, hitbox_max.x)),
 		math.max(hitbox_min.y, math.min(viewPos.y, hitbox_max.y)),
 		math.max(hitbox_min.z, math.min(viewPos.z, hitbox_max.z))
 	)
 
-	-- Distance from viewPos to closest point on hitbox
+	-- Check backstab range
 	local distanceToHitbox = (viewPos - closestPoint):Length()
-
-	-- Can we even reach? (backstab range check)
-	if distanceToHitbox > BACKSTAB_RANGE then
+	if distanceToHitbox > TF2.BACKSTAB_RANGE then
 		return false
 	end
 
-	-- Calculate swing direction and end point
+	-- Trace to target
 	local dirToClosest = closestPoint - viewPos
 	local dirLen = dirToClosest:Length()
 	local direction = (dirLen > 0) and (dirToClosest / dirLen) or Vector3(1, 0, 0)
-	local swingEnd = viewPos + direction * BACKSTAB_RANGE
+	local swingEnd = viewPos + direction * TF2.BACKSTAB_RANGE
 
-	-- TraceLine first - if it hits anything, that's the final result
+	-- Line trace first
 	local trace = engine.TraceLine(viewPos, swingEnd, MASK_SHOT_HULL)
 	if trace.fraction < 1 then
-		-- Hit something - check what it is
-		if trace.entity == TargetPlayer.entity then
-			return true -- Hit target
-		else
-			return false -- Hit wall, teammate, or other obstacle
-		end
+		return trace.entity == TargetPlayer.entity
 	end
 
-	-- TraceLine hit nothing → try TraceHull (melee has hull)
-	trace = engine.TraceHull(viewPos, swingEnd, SwingHull.Min, SwingHull.Max, MASK_SHOT_HULL)
-	if trace.fraction < 1 then
-		-- Hit something with hull - check what it is
-		if trace.entity == TargetPlayer.entity then
-			return true -- Hit target
-		else
-			return false -- Hit wall, teammate, or other obstacle
-		end
-	end
-
-	return true -- Both traces hit nothing - clear path
+	-- Hull trace for melee
+	trace = engine.TraceHull(viewPos, swingEnd, HULL.SWING_MIN, HULL.SWING_MAX, MASK_SHOT_HULL)
+	return trace.fraction == 1 or trace.entity == TargetPlayer.entity
 end
 
 local function CheckBackstab(testPoint)
-	-- Safety check: ensure TargetPlayer exists
 	if not TargetPlayer or not TargetPlayer.viewpos or not TargetPlayer.Back or not TargetPlayer.Pos then
 		return false
 	end
 
-	local viewPos = testPoint + pLocalViewOffset -- Adjust for viewpoint
-	local enemyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, TargetPlayer.viewpos + TargetPlayer.Back)) --back direction
-	local spyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, viewPos)) --spy direction
+	local viewPos = testPoint + pLocalViewOffset
+	local enemyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, TargetPlayer.viewpos + TargetPlayer.Back))
+	local spyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, viewPos))
 
-	-- Check if the yaw delta is within the correct backstab angle range
-	if CheckYawDelta(spyYaw, enemyYaw) and IsInRange(TargetPlayer.Pos, viewPos, BACKSTAB_RANGE) then
-		return true
+	return CheckYawDelta(spyYaw, enemyYaw) and IsInRange(TargetPlayer.Pos, viewPos, TF2.BACKSTAB_RANGE)
+end
+
+-- Combined check: backstab possible AND attack path clear
+local function CanBackstabFromPos(testPoint)
+	-- Early exit if target invalid (cheapest check)
+	if not TargetPlayer or not TargetPlayer.viewpos or not TargetPlayer.Back or not TargetPlayer.Pos then
+		return false
 	end
 
-	return false
+	-- Check backstab geometry first (cheaper than LOS trace)
+	local viewPos = testPoint + pLocalViewOffset
+	local enemyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, TargetPlayer.viewpos + TargetPlayer.Back))
+	local spyYaw = NormalizeYaw(PositionYaw(TargetPlayer.viewpos, viewPos))
+
+	if not (CheckYawDelta(spyYaw, enemyYaw) and IsInRange(TargetPlayer.Pos, viewPos, TF2.BACKSTAB_RANGE)) then
+		return false
+	end
+
+	-- LOS check last (most expensive)
+	return CanAttackFromPos(testPoint)
 end
 
--- Combined check: can backstab AND can attack (LOS clear)
-local function CanBackstabFromPos(testPoint)
-	return CheckBackstab(testPoint) and CanAttackFromPos(testPoint)
-end
-
--- Constants
-local SIMULATION_TICKS = 23 -- Number of ticks for simulation
-
-local FORWARD_COLLISION_ANGLE = 55
-local GROUND_COLLISION_ANGLE_LOW = 45
-local GROUND_COLLISION_ANGLE_HIGH = 55
-
--- Function to handle forward collision
-local function handleForwardCollision(vel, wallTrace)
+-- Handle forward collision with walls
+local function HandleForwardCollision(vel, wallTrace)
 	local normal = wallTrace.plane
 	local angle = math.deg(math.acos(normal:Dot(Vector3(0, 0, 1))))
 
-	-- Adjust velocity if angle is greater than forward collision angle
-	if angle > FORWARD_COLLISION_ANGLE then
-		-- The wall is steep, adjust velocity to prevent moving into the wall
+	-- Steep wall: reflect velocity
+	if angle > TF2.FORWARD_COLLISION_ANGLE then
 		local dot = vel:Dot(normal)
 		vel = vel - normal * dot
 	end
@@ -723,15 +819,15 @@ local function handleForwardCollision(vel, wallTrace)
 	return wallTrace.endpos.x, wallTrace.endpos.y
 end
 
--- Function to handle ground collision
-local function handleGroundCollision(vel, groundTrace, vUp)
+-- Handle ground collision
+local function HandleGroundCollision(vel, groundTrace, vUp)
 	local normal = groundTrace.plane
 	local angle = math.deg(math.acos(normal:Dot(vUp)))
 	local onGround = false
 
-	if angle < GROUND_COLLISION_ANGLE_LOW then
+	if angle < TF2.GROUND_ANGLE_LOW then
 		onGround = true
-	elseif angle < GROUND_COLLISION_ANGLE_HIGH then
+	elseif angle < TF2.GROUND_ANGLE_HIGH then
 		vel.x, vel.y, vel.z = 0, 0, 0
 	else
 		local dot = vel:Dot(normal)
@@ -745,20 +841,20 @@ local function handleGroundCollision(vel, groundTrace, vUp)
 	return groundTrace.endpos, onGround
 end
 
--- Cache structure (TF2 defaults: gravity=800, stepSize=18)
+-- Simulation cache with defaults
 local simulationCache = {
 	tickInterval = globals.TickInterval(),
-	gravity = SV_GRAVITY or 800, -- Use cached ConVar with fallback
-	stepSize = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize") or 18,
-	flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0,
+	gravity = SV_GRAVITY or 800,
+	stepSize = 18, -- TF2 default
+	flags = 0,
 }
 
--- Function to update cache (call this when game environment changes)
+-- Update simulation cache from current game state
 local function UpdateSimulationCache()
 	simulationCache.tickInterval = globals.TickInterval()
-	simulationCache.gravity = SV_GRAVITY or 800 -- Use cached ConVar with fallback
+	simulationCache.gravity = SV_GRAVITY or 800
 	local step = pLocal and pLocal:GetPropFloat("localdata", "m_flStepSize")
-	simulationCache.stepSize = (step and step > 0) and step or 18 -- TF2 default step size
+	simulationCache.stepSize = (step and step > 0) and step or 18
 	simulationCache.flags = pLocal and pLocal:GetPropInt("m_fFlags") or 0
 end
 
@@ -767,14 +863,16 @@ local function shouldHitEntityFun(entity, player)
 		return false
 	end
 
+	-- Ignore dropped items early (cheap check)
+	local entClass = entity:GetClass()
+	if entClass == "CTFAmmoPack" or entClass == "CTFDroppedWeapon" then
+		return false
+	end
+
 	-- Most common: player collision (check first for speed)
 	if entity:IsPlayer() then
-		-- Ignore self
-		if entity:GetIndex() == player:GetIndex() then
-			return false
-		end
-		-- Ignore teammates
-		if entity:GetTeamNumber() == player:GetTeamNumber() then
+		-- Ignore self and teammates early
+		if entity:GetIndex() == player:GetIndex() or entity:GetTeamNumber() == player:GetTeamNumber() then
 			return false
 		end
 		-- Hit enemy players
@@ -783,17 +881,8 @@ local function shouldHitEntityFun(entity, player)
 
 	-- World geometry (stairs, ramps, brushes)
 	local pos = entity:GetAbsOrigin()
-	if pos then
-		local contents = engine.GetPointContents(pos + Vector3(0, 0, 1))
-		if contents ~= 0 then
-			return true
-		end
-	end
-
-	-- Ignore dropped items
-	local entClass = entity:GetClass()
-	if entClass == "CTFAmmoPack" or entClass == "CTFDroppedWeapon" then
-		return false
+	if pos and engine.GetPointContents(pos + Vector3(0, 0, 1)) ~= 0 then
+		return true
 	end
 
 	return true
@@ -812,15 +901,12 @@ local function SimulateDash(targetDirection, ticks)
 
 	-- Start with current velocity, will accelerate toward maxSpeed in wishdir
 	local currentVel = pLocal:EstimateAbsVelocity()
-	local vel = Vector3(currentVel.x, currentVel.y, currentVel.z)
+	local lastP = pLocal:GetAbsOrigin() -- Initialize position
+	local lastV = Vector3(currentVel.x, currentVel.y, currentVel.z) -- Initialize velocity
 
-	-- Set gravity and step size from cached values
+	-- Set gravity and step size from cache
 	local gravity = (simulationCache.gravity or 800) * tick_interval
-	local stepSize = simulationCache.stepSize
-	-- Ensure stepSize is at least 18 (TF2 default) - handles both nil and 0
-	if not stepSize or stepSize <= 0 then
-		stepSize = 18
-	end
+	local stepSize = simulationCache.stepSize or 18
 	local vUp = Vector3(0, 0, 1)
 	local vStep = Vector3(0, 0, stepSize)
 
@@ -829,11 +915,9 @@ local function SimulateDash(targetDirection, ticks)
 		return shouldHitEntityFun(entity, pLocal)
 	end
 
-	-- Initialize simulation state
-	local lastP = pLocalPos
-	local lastV = vel
+	-- Check ground state from flags
 	local flags = simulationCache.flags
-	local lastG = (flags & 1 == 1) -- Check if initially on the ground
+	local lastG = (flags & 1 == 1)
 
 	-- Track the closest backstab opportunity
 	local closestBackstabPos = nil
@@ -847,16 +931,16 @@ local function SimulateDash(targetDirection, ticks)
 		-- Apply friction first (ground movement)
 		local vel = ApplyFriction(lastV, lastG)
 
-		-- Accelerate toward maxSpeed in wishdir (assume optimal input)
+		-- Accelerate toward max speed in desired direction
 		if lastG then
-			local currentspeed = vel:Dot(wishdir)
-			local addspeed = maxSpeed - currentspeed
-			if addspeed > 0 then
-				local accelspeed = math.min(TF2_ACCEL * maxSpeed * tick_interval, addspeed)
-				vel = vel + wishdir * accelspeed
+			local currentSpeed = vel:Dot(wishdir)
+			local addSpeed = maxSpeed - currentSpeed
+			if addSpeed > 0 then
+				local accelSpeed = math.min(TF2.ACCELERATION * maxSpeed * tick_interval, addSpeed)
+				vel = vel + wishdir * accelSpeed
 			end
 
-			-- Cap to max speed (horizontal)
+			-- Cap speed to effective max
 			local horizSpeed = math.sqrt(vel.x * vel.x + vel.y * vel.y)
 			if horizSpeed > maxSpeed then
 				local scale = maxSpeed / horizSpeed
@@ -870,46 +954,21 @@ local function SimulateDash(targetDirection, ticks)
 
 		-- Collision and movement logic
 		if Menu.Advanced.ColisionCheck then
-			local wallTrace = engine.TraceHull(
-				lastP + vStep,
-				pos + vStep,
-				vHitbox.Min,
-				vHitbox.Max,
-				MASK_PLAYERSOLID,
-				shouldHitEntity
-			)
+			local wallTrace =
+				engine.TraceHull(lastP + vStep, pos + vStep, HULL.MIN, HULL.MAX, MASK_PLAYERSOLID, shouldHitEntity)
 			if wallTrace.fraction < 1 then
-				if wallTrace.entity then
-					if wallTrace.entity:GetClass() == "CTFPlayer" then
-						break
-					else
-						pos.x, pos.y = handleForwardCollision(vel, wallTrace)
-					end
-				else
-					pos.x, pos.y = handleForwardCollision(vel, wallTrace)
+				if wallTrace.entity and wallTrace.entity:GetClass() == "CTFPlayer" then
+					break
 				end
+				pos.x, pos.y = HandleForwardCollision(vel, wallTrace)
 			end
 
 			local downStep = onGround and vStep or Vector3(0, 0, 0)
-			local groundTrace = engine.TraceHull(
-				pos + vStep,
-				pos - downStep,
-				vHitbox.Min,
-				vHitbox.Max,
-				MASK_PLAYERSOLID,
-				shouldHitEntity
-			)
+			local groundTrace =
+				engine.TraceHull(pos + vStep, pos - downStep, HULL.MIN, HULL.MAX, MASK_PLAYERSOLID, shouldHitEntity)
 			if groundTrace.fraction < 1 then
-				pos, onGround = handleGroundCollision(vel, groundTrace, vUp)
-			else
-				onGround = false
+				pos, onGround = HandleGroundCollision(vel, groundTrace, vUp)
 			end
-		end
-
-		-- Simulate jumping if space is pressed
-		if onGround and input.IsButtonDown(KEY_SPACE) then
-			vel.z = (gui.GetValue("Duck Jump") == 1) and 277 or 271
-			onGround = false
 		end
 
 		-- Apply gravity if not on the ground
@@ -917,17 +976,11 @@ local function SimulateDash(targetDirection, ticks)
 			vel.z = vel.z - gravity
 		end
 
-		-- EARLY TERMINATION: Stop if horizontal speed drops below 5 units/tick (wall sliding too slow)
-		local horizSpeed = math.sqrt(vel.x * vel.x + vel.y * vel.y)
-		if horizSpeed < 37 then
-			break -- No point simulating further, we're stuck
-		end
+		-- Store position first (cheaper than backstab check)
+		simPositions[i] = pos
 
 		-- Check for backstab possibility at the current position (with LOS check)
 		local isBackstab = CanBackstabFromPos(pos)
-
-		-- Store each tick position and backstab status in LOCAL arrays
-		simPositions[i] = pos
 		simEndwarps[i] = { pos, isBackstab, i } -- Include tick number for scoring
 
 		-- Track EARLIEST backstab tick (for fallback)
@@ -945,37 +998,41 @@ local function SimulateDash(targetDirection, ticks)
 	return lastP, minWarpTicks, simPositions, simEndwarps
 end
 
--- Corners must account for BOTH player and enemy hitbox radius
--- Player hitbox (24) + Enemy hitbox (24) = 48 units needed for clearance
-local PLAYER_HITBOX_RADIUS = 24
-local ENEMY_HITBOX_RADIUS = 24
-local CORNER_DISTANCE = PLAYER_HITBOX_RADIUS + ENEMY_HITBOX_RADIUS -- 48 units total
-local corners = {
-	Vector3(-CORNER_DISTANCE, CORNER_DISTANCE, 0.0), -- top left corner
-	Vector3(CORNER_DISTANCE, CORNER_DISTANCE, 0.0), -- top right corner
-	Vector3(-CORNER_DISTANCE, -CORNER_DISTANCE, 0.0), -- bottom left corner
-	Vector3(CORNER_DISTANCE, -CORNER_DISTANCE, 0.0), -- bottom right corner
-}
+-- Corner positions for direction mapping (preserves existing logic)
+local function GetDynamicCorners(cornerDistance)
+	if not cornerDistance or cornerDistance <= 0 then
+		cornerDistance = TF2.HITBOX_RADIUS * 2 -- Fallback to default
+	end
+	return {
+		Vector3(-cornerDistance, cornerDistance, 0.0), -- top left
+		Vector3(cornerDistance, cornerDistance, 0.0), -- top right
+		Vector3(-cornerDistance, -cornerDistance, 0.0), -- bottom left
+		Vector3(cornerDistance, -cornerDistance, 0.0), -- bottom right
+	}
+end
 
 local center = Vector3(0, 0, 0)
 
-local direction_to_corners = {
-	[-1] = {
-		[-1] = { center, corners[4], corners[1] }, -- Top-left
-		[0] = { center, corners[4], corners[2] }, -- Left
-		[1] = { center, corners[3], corners[2] }, -- Top-left to bottom-right (corrected)
-	},
-	[0] = {
-		[-1] = { center, corners[2], corners[1] }, -- BACK: top corners (y=49)
-		[0] = { center }, -- Center
-		[1] = { center, corners[3], corners[4] }, -- FRONT: bottom corners (y=-49) - FIXED
-	},
-	[1] = {
-		[-1] = { center, corners[2], corners[3] }, -- Top-right to bottom-left (corrected)
-		[0] = { center, corners[1], corners[3] }, -- Right
-		[1] = { center, corners[1], corners[4] }, -- Bottom-right
-	},
-}
+-- Direction mapping for corner selection (preserves existing logic)
+local function GetDirectionToCorners(corners)
+	return {
+		[-1] = {
+			[-1] = { center, corners[4], corners[1] }, -- Top-left
+			[0] = { center, corners[4], corners[2] }, -- Left
+			[1] = { center, corners[3], corners[2] }, -- Top-left to bottom-right
+		},
+		[0] = {
+			[-1] = { center, corners[2], corners[1] }, -- BACK: top corners
+			[0] = { center }, -- Center
+			[1] = { center, corners[3], corners[4] }, -- FRONT: bottom corners
+		},
+		[1] = {
+			[-1] = { center, corners[2], corners[3] }, -- Top-right to bottom-left
+			[0] = { center, corners[1], corners[3] }, -- Right
+			[1] = { center, corners[1], corners[4] }, -- Bottom-right
+		},
+	}
+end
 
 local function determine_direction(my_pos, enemy_pos, hitbox_size, vertical_range)
 	local dx = enemy_pos.x - my_pos.x
@@ -994,7 +1051,9 @@ end
 
 local function get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertical_range)
 	local direction = determine_direction(my_pos, enemy_pos, hitbox_size, vertical_range)
-	local bestcorners = direction_to_corners[direction[1]] and direction_to_corners[direction[1]][direction[2]]
+	local corners = GetDynamicCorners(hitbox_size)
+	local directionMap = GetDirectionToCorners(corners)
+	local bestcorners = directionMap[direction[1]] and directionMap[direction[1]][direction[2]]
 
 	if not bestcorners then
 		return { center }
@@ -1003,17 +1062,14 @@ local function get_best_corners_or_origin(my_pos, enemy_pos, hitbox_size, vertic
 	return bestcorners
 end
 
--- Scale a corner unit vector to actual distance (preserves AABB shape)
--- Don't normalize! AABB corners are at (±dist, ±dist), diagonal stays diagonal
-local function scale_corner_to_distance(corner, dist)
+-- Scale corner vector to distance (preserves AABB shape)
+local function ScaleCorner(corner, distance)
 	return Vector3(
-		corner.x ~= 0 and (corner.x > 0 and dist or -dist) or 0,
-		corner.y ~= 0 and (corner.y > 0 and dist or -dist) or 0,
+		corner.x ~= 0 and (corner.x > 0 and distance or -distance) or 0,
+		corner.y ~= 0 and (corner.y > 0 and distance or -distance) or 0,
 		0
 	)
 end
-
-local BACKSTAB_MAX_YAW_DIFF = 180 -- Maximum allowable yaw difference for backstab
 
 -- PASS 1: Project where we'd end up if we coast without input
 -- Returns the optimal wishdir accounting for coasting AND recalculated best position
@@ -1035,8 +1091,8 @@ local function CalculateOptimalWishdir(
 	local dirFromStart = baseTarget - startPos
 	local dirFromStartNorm = Normalize(dirFromStart)
 
-	-- Extended target: 450 units past the corner in same direction
-	local extendedTarget = baseTarget + dirFromStartNorm * 450
+	-- Extended target: target extension units past the corner in same direction
+	local extendedTarget = baseTarget + dirFromStartNorm * TF2.TARGET_EXTENSION
 
 	-- STEP 2: Simulate coasting WITHOUT input
 	local pos = Vector3(startPos.x, startPos.y, startPos.z)
@@ -1049,7 +1105,7 @@ local function CalculateOptimalWishdir(
 		-- Apply friction
 		local speed = vel:Length()
 		if speed > 0 then
-			local drop = speed * TF2_GROUND_FRICTION * tick_interval
+			local drop = speed * TF2.GROUND_FRICTION * tick_interval
 			local newspeed = math.max(speed - drop, 0)
 			if speed > 0 then
 				vel = vel * (newspeed / speed)
@@ -1097,32 +1153,24 @@ local function CalculateTrickstab(cmd)
 	-- Get actual collision hulls from game (used in simulation)
 	local myMins, myMaxs = pLocal:GetMins(), pLocal:GetMaxs()
 	local myRadius = myMaxs.x -- Player's actual collision radius
-	local enemyMins = TargetPlayer.mins or Vector3(-24, -24, 0)
-	local enemyMaxs = TargetPlayer.maxs or Vector3(24, 24, 82)
-	local enemyRadius = TargetPlayer.hitboxRadius or 24
+	local enemyMins = TargetPlayer.mins or HULL.MIN
+	local enemyMaxs = TargetPlayer.maxs or HULL.MAX
+	local enemyRadius = TargetPlayer.hitboxRadius or TF2.HITBOX_RADIUS
 
 	-- Combined hitbox size (exact collision boundary, NO buffer)
 	local combinedHitbox = myRadius + enemyRadius
 
-	-- Corner positions: combined hitbox + 1 unit buffer (for target point selection)
-	local cornerDistance = combinedHitbox
-	local dynamicCorners = {
-		Vector3(-cornerDistance, cornerDistance, 0.0), -- top left
-		Vector3(cornerDistance, cornerDistance, 0.0), -- top right
-		Vector3(-cornerDistance, -cornerDistance, 0.0), -- bottom left
-		Vector3(cornerDistance, -cornerDistance, 0.0), -- bottom right
-	}
-
 	-- Direction detection uses EXACT combined hitbox (NO buffer)
 	-- Buffer would cause "center" detection when actually on a side
 	local hitbox_size = combinedHitbox
-	local vertical_range = TargetPlayer.hitboxHeight or 82 -- For vertical checks
+	local vertical_range = TargetPlayer.hitboxHeight or TF2.HITBOX_HEIGHT -- For vertical checks
 	local playerClass = pLocal:GetPropInt("m_iClass")
-	local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
+	local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or TF2.MAX_SPEED
 	local currentVel = pLocal:EstimateAbsVelocity()
-	local warpTicks = warp.GetChargedTicks() or 24
+	local warpTicks = warp.GetChargedTicks() or TF2.WARP_READY_TICKS
 
 	-- Use dynamic corners for position calculation
+	local dynamicCorners = GetDynamicCorners(hitbox_size)
 	local all_positions = {}
 	for _, corner in ipairs(dynamicCorners) do
 		all_positions[#all_positions + 1] = corner
@@ -1148,7 +1196,15 @@ local function CalculateTrickstab(cmd)
 	end
 
 	-- Determine which side to prioritize based on yaw difference
-	local best_side = (left_yaw_diff < right_yaw_diff) and "left" or "right"
+	-- Manual direction override: A/D keys force left/right
+	local userSideMove = cmd:GetSideMove()
+	local best_side
+	if Menu.Advanced.ManualDirection and math.abs(userSideMove) >= TF2.MANUAL_THRESHOLD then
+		-- D key (positive sidemove) = right, A key (negative sidemove) = left
+		best_side = (userSideMove > 0) and "right" or "left"
+	else
+		best_side = (left_yaw_diff < right_yaw_diff) and "left" or "right"
+	end
 	local best_positions = {}
 
 	-- Find optimal side position - pick the one with SMALLEST yaw delta
@@ -1193,11 +1249,11 @@ local function CalculateTrickstab(cmd)
 	local dx = enemy_pos.x - my_pos.x
 	local dy = enemy_pos.y - my_pos.y
 	local dz = enemy_pos.z - my_pos.z
-	local buffor = 5
+	local buffer = 5
 
 	local out_of_vertical_range = (math.abs(dz) > vertical_range) and 1 or 0
-	local direction_x = ((dx > hitbox_size - buffor) and 1 or 0) - ((dx < -hitbox_size + buffor) and 1 or 0)
-	local direction_y = ((dy > hitbox_size - buffor) and 1 or 0) - ((dy < -hitbox_size + buffor) and 1 or 0)
+	local direction_x = ((dx > hitbox_size - buffer) and 1 or 0) - ((dx < -hitbox_size + buffer) and 1 or 0)
+	local direction_y = ((dy > hitbox_size - buffer) and 1 or 0) - ((dy < -hitbox_size + buffer) and 1 or 0)
 
 	-- Store for debug visualization
 	debugCornerData = {
@@ -1240,6 +1296,7 @@ local function CalculateTrickstab(cmd)
 	local minWarpTicks = math.huge
 	local allPaths = {} -- Store ALL simulation paths for visualization
 	local allEndwarps = {} -- Store ALL endwarp data
+	local allHitWall = {} -- Track which paths hit walls (for red visualization)
 	local bestDirection = nil
 	local totalBackstabPoints = 0 -- Count total backstab positions found
 
@@ -1262,24 +1319,16 @@ local function CalculateTrickstab(cmd)
 	local enemyBackYaw = NormalizeYaw(PositionYaw(enemy_pos, enemy_pos + TargetPlayer.Back))
 	local ourYawToEnemy = NormalizeYaw(PositionYaw(enemy_pos, my_pos))
 	local ourYawDeltaFromBack = math.abs(NormalizeYaw(ourYawToEnemy - enemyBackYaw))
-	local withinBackAngle = ourYawDeltaFromBack <= 90
+	local withinBackAngle = ourYawDeltaFromBack <= TF2.BACKSTAB_ANGLE
 
 	-- STAIRSTAB CHECK: Height difference >= 82 units = only CENTER direction
-	-- When above/below enemy, left/right is useless - only center/back matters
 	local heightDiff = math.abs(my_pos.z - enemy_pos.z)
-	local isStairstab = heightDiff >= 82
+	local isStairstab = heightDiff >= TF2.STAIRSTAB_HEIGHT
 
-	-- Track if optimal side hit a wall (to decide if we need other_side)
-	local optimalHitWall = false
+	-- Track if manual direction was forced
+	local manualDirectionForced = Menu.Advanced.ManualDirection and math.abs(userSideMove) >= TF2.MANUAL_THRESHOLD
 
-	-- Path 1: Optimal side (only simulate if NOT stairstab)
-	if not isStairstab and optimalSidePos then
-		table.insert(simulationTargets, { name = "optimal_side", offset = optimalSidePos })
-	elseif not isStairstab and not optimalSidePos then
-		print("ERROR: No optimal side position found!")
-	end
-
-	-- Helper to simulate a single path and check wall hit
+	-- Helper to simulate a single path and check wall hit (uses hull trace for walkability)
 	local function SimulatePath(simTarget)
 		local optimalWishdir = CalculateOptimalWishdir(
 			my_pos,
@@ -1294,10 +1343,21 @@ local function CalculateTrickstab(cmd)
 		local targetDirection = optimalWishdir * 100
 		local final_pos, minTicks, simPath, simEndwarps = SimulateDash(targetDirection, warpTicks)
 
-		-- Check if simulation was cut short (hit wall / early termination)
-		local expectedTicks = warpTicks
-		local actualTicks = simPath and #simPath or 0
-		local hitWall = actualTicks < expectedTicks
+		-- Simple wall check: hull trace from start to end of path
+		local hitWall = false
+		if simPath and #simPath > 0 then
+			local lastPos = simPath[#simPath]
+			local traceStart = my_pos + Vector3(0, 0, 18)
+			local traceEnd = lastPos + Vector3(0, 0, 18)
+			local wallTrace = engine.TraceHull(traceStart, traceEnd, HULL.MIN, HULL.MAX, MASK_PLAYERSOLID_BRUSHONLY)
+
+			-- Hit something that's NOT an enemy = wall
+			if wallTrace.fraction < 0.8 then
+				if not (wallTrace.entity and wallTrace.entity:IsPlayer()) then
+					hitWall = true
+				end
+			end
+		end
 
 		return simPath, simEndwarps, optimalWishdir, hitWall
 	end
@@ -1321,10 +1381,10 @@ local function CalculateTrickstab(cmd)
 
 				if isWithinBackstabYaw then
 					local yawDiff = math.abs(NormalizeYaw(spyYaw - enemyYaw))
-					local yawComponent = math.max(0, 1 - yawDiff / 90)
+					local yawComponent = math.max(0, 1 - yawDiff / TF2.BACKSTAB_ANGLE)
 					local distance = (backstab_pos - enemy_pos):Length()
-					local distanceComponent = math.max(0, 1 - distance / 120)
-					local score = 0.7 * yawComponent + 0.3 * distanceComponent
+					local distanceComponent = math.max(0, 1 - distance / TF2.MAX_SCORE_DISTANCE)
+					local score = TF2.YAW_WEIGHT * yawComponent + TF2.DISTANCE_WEIGHT * distanceComponent
 
 					if score > bestScore or (score == bestScore and tickNum < minWarpTicks) then
 						bestScore = score
@@ -1346,53 +1406,89 @@ local function CalculateTrickstab(cmd)
 		local centerPath, centerEndwarps, centerWishdir, centerHitWall = SimulatePath(simulationTargets[1])
 		table.insert(allPaths, centerPath)
 		table.insert(allEndwarps, centerEndwarps)
+		table.insert(allHitWall, centerHitWall)
 		ScoreEndwarps(centerEndwarps, centerWishdir * 100)
+	elseif manualDirectionForced then
+		-- MANUAL DIRECTION: Only simulate forced direction + center (if within backstab angle)
+		-- Don't question the manual decision - just do 1 sim
+		if optimalSidePos then
+			table.insert(simulationTargets, { name = "manual_side", offset = optimalSidePos })
+		end
+
+		-- Simulate the manual side
+		local manualPath, manualEndwarps, manualWishdir, manualHitWall
+		if #simulationTargets > 0 then
+			manualPath, manualEndwarps, manualWishdir, manualHitWall = SimulatePath(simulationTargets[1])
+			table.insert(allPaths, manualPath)
+			table.insert(allEndwarps, manualEndwarps)
+			table.insert(allHitWall, manualHitWall)
+			ScoreEndwarps(manualEndwarps, manualWishdir * 100)
+		end
+
+		-- Add center ONLY if within backstab angle (physically able to backstab)
+		if withinBackAngle then
+			table.insert(simulationTargets, { name = "center", offset = center })
+			local centerPath, centerEndwarps, centerWishdir, centerHitWall =
+				SimulatePath(simulationTargets[#simulationTargets])
+			table.insert(allPaths, centerPath)
+			table.insert(allEndwarps, centerEndwarps)
+			table.insert(allHitWall, centerHitWall)
+			ScoreEndwarps(centerEndwarps, centerWishdir * 100)
+		end
 	else
-		-- NORMAL: First simulate optimal side to check if it hits a wall
+		-- AUTO MODE: Simulate optimal side first, only try other if it hits a WORLD wall
 		local optimalPath, optimalEndwarps, optimalWishdir, optimalHitWall
-		if optimalSidePos and #simulationTargets > 0 then
+		local optimalFoundStabPoints = false
+
+		-- Path 1: Optimal side
+		if optimalSidePos then
+			table.insert(simulationTargets, { name = "optimal_side", offset = optimalSidePos })
 			optimalPath, optimalEndwarps, optimalWishdir, optimalHitWall = SimulatePath(simulationTargets[1])
 			table.insert(allPaths, optimalPath)
 			table.insert(allEndwarps, optimalEndwarps)
-			-- Score the optimal path
+			table.insert(allHitWall, optimalHitWall)
+
+			-- Check if we found any stab points on optimal path
+			local stabPointsBefore = totalBackstabPoints
 			ScoreEndwarps(optimalEndwarps, optimalWishdir * 100)
+			optimalFoundStabPoints = totalBackstabPoints > stabPointsBefore
 		end
 
-		-- Path 2: Other side - show if optimal hit a wall OR within 90° of back
-		-- This helps assistance pick the path with more open space
-		if otherSidePos and (optimalHitWall or withinBackAngle) then
+		-- Path 2: Other side - if optimal hit wall AND didn't find stab points
+		-- This becomes the new "best" direction
+		if otherSidePos and optimalHitWall and not optimalFoundStabPoints then
 			table.insert(simulationTargets, { name = "other_side", offset = otherSidePos })
+			local otherPath, otherEndwarps, otherWishdir, otherHitWall =
+				SimulatePath(simulationTargets[#simulationTargets])
+			table.insert(allPaths, otherPath)
+			table.insert(allEndwarps, otherEndwarps)
+			table.insert(allHitWall, otherHitWall)
+			ScoreEndwarps(otherEndwarps, otherWishdir * 100)
 		end
 
-		-- Path 3: Center/back - if within 90° of back
+		-- Path 3: Center/back - ONLY if within BACKSTAB angle (physically able to backstab)
 		if withinBackAngle then
 			table.insert(simulationTargets, { name = "center", offset = center })
-		end
-
-		-- Simulate remaining paths (skip first which we already did)
-		for i = 2, #simulationTargets do
-			local simTarget = simulationTargets[i]
-			local simPath, simEndwarps, wishdir, hitWall = SimulatePath(simTarget)
-
-			-- Store this simulation path for visualization
-			table.insert(allPaths, simPath)
-			table.insert(allEndwarps, simEndwarps)
-
-			-- Score this path
-			ScoreEndwarps(simEndwarps, wishdir * 100)
+			local centerPath, centerEndwarps, centerWishdir, centerHitWall =
+				SimulatePath(simulationTargets[#simulationTargets])
+			table.insert(allPaths, centerPath)
+			table.insert(allEndwarps, centerEndwarps)
+			table.insert(allHitWall, centerHitWall)
+			ScoreEndwarps(centerEndwarps, centerWishdir * 100)
 		end
 	end
 
 	-- Set global visualization data to show ALL paths (not just best one)
 	positions = allPaths
 	endwarps = allEndwarps
+	pathHitWall = allHitWall
 
 	-- Only set fallback direction if we found at least some backstab points
 	-- If no backstab points at all, leave bestDirection nil so MoveAssistance uses simple approach
 	if not bestDirection and totalBackstabPoints > 0 then
 		if isStairstab then
 			-- Stairstab: fallback to center/back direction
-			bestDirection = enemy_pos + TargetPlayer.Back * (myRadius + enemyRadius + 1) - my_pos
+			bestDirection = enemy_pos + TargetPlayer.Back * (myRadius + enemyRadius) - my_pos
 		elseif optimalSidePos then
 			bestDirection = enemy_pos + optimalSidePos - my_pos
 		end
@@ -1511,333 +1607,155 @@ local function OnKillRecharge(event)
 end
 
 -- Modified AutoWarp to use minWarpTicks from CalculateTrickstab
-local function AutoWarp(cmd)
-	local sideMove = cmd:GetSideMove()
-	local forwardMove = cmd:GetForwardMove()
+local function AutoWarp(cmd, hasUserInput)
+	-- Note: visuals cleared at start of OnCreateMove (before any early returns)
+
 	local playerClass = pLocal:GetPropInt("m_iClass")
-	local currentVel = pLocal:EstimateAbsVelocity()
 
 	-- Calculate the optimal backstab position and direction
 	local bestDirection
 	local totalBackstabPoints
 	BackstabPos, bestScore, minWarpTicks, bestDirection, totalBackstabPoints = CalculateTrickstab(cmd)
 
-	-- PRIORITY 0: Movement Assistance - Helps reach enemy's back (footwork only)
-	-- Works standalone, but AutoWalk takes priority when stab points found
-	-- Picks LEFT or RIGHT side with smallest yaw delta to enemy's back
-	-- User can override: sidemove -450 = force RIGHT, +450 = force LEFT
-	local backstabPointCount = totalBackstabPoints or 0
-	local hasStabPoints = backstabPointCount > 0
+	-- NOTE: Angle snap is the ONLY functional method currently.
+	-- We cannot override cmd packets during warp ticks - if user holds forward we can't change it.
+	-- Non-angle-snap mode is broken until lbox fixes cmd override during warp.
 
-	-- AutoWalk has priority when enabled AND stab points found
-	local autoWalkTakesPriority = Menu.Main.AutoWalk and hasStabPoints
+	-- Direction to walk - priority: bestDirection > BackstabPos > LEFT/RIGHT fallback
+	local dir = bestDirection
+	if not dir and BackstabPos ~= emptyVec then
+		dir = BackstabPos - pLocalPos
+	end
+	-- Fallback: walk to LEFT or RIGHT side (NOT center/back when in front!)
+	if not dir and TargetPlayer and TargetPlayer.Pos and TargetPlayer.Back then
+		local enemy_pos = TargetPlayer.Pos
+		local my_pos = pLocalPos
 
-	if Menu.Main.MoveAsistance and TargetPlayer and TargetPlayer.Pos and TargetPlayer.Back then
-		local canCurrentlyBackstab = CanBackstabFromPos(pLocalPos)
+		-- Check if we're within back angle (only then go center)
+		local enemyBackYaw = NormalizeYaw(PositionYaw(enemy_pos, enemy_pos + TargetPlayer.Back))
+		local ourYawToEnemy = NormalizeYaw(PositionYaw(enemy_pos, my_pos))
+		local ourYawDeltaFromBack = math.abs(NormalizeYaw(ourYawToEnemy - enemyBackYaw))
+		local withinBackAngle = ourYawDeltaFromBack <= 90 -- Within 90 degrees of back
 
-		-- MoveAssistance active when not backstabbing AND AutoWalk not taking priority
-		if not canCurrentlyBackstab and not autoWalkTakesPriority then
-			local my_pos = pLocalPos
-			local enemy_pos = TargetPlayer.Pos
+		local myMins, myMaxs = pLocal:GetMins(), pLocal:GetMaxs()
+		local myRadius = myMaxs and myMaxs.x or 24
+		local enemyRadius = TargetPlayer.hitboxRadius or TF2.HITBOX_RADIUS
+		local combinedHitbox = myRadius + enemyRadius
 
-			-- VISIBILITY CHECK: Don't assist if wall between us and enemy
-			local losTrace = engine.TraceLine(pLocalViewPos, TargetPlayer.viewpos, MASK_SHOT)
-			if losTrace.fraction < 0.99 and losTrace.entity ~= TargetPlayer.entity then
-				-- Wall blocking LOS - don't waste time assisting
-				goto skip_assistance
-			end
-
-			-- STAIRSTAB CHECK: Height diff >= 82 = only CENTER direction
-			local heightDiff = math.abs(my_pos.z - enemy_pos.z)
-			local isStairstab = heightDiff >= 82
-
-			local enemyBackYaw = NormalizeYaw(PositionYaw(enemy_pos, enemy_pos + TargetPlayer.Back))
-
-			-- Get hitbox sizes
-			local myMins, myMaxs = pLocal:GetMins(), pLocal:GetMaxs()
-			local myRadius = myMaxs.x
-			local enemyRadius = TargetPlayer.hitboxRadius or 24
-			local combinedHitbox = myRadius + enemyRadius
-
-			-- Get velocity and speed for 2-pass wishdir calculation
-			local vel = pLocal:EstimateAbsVelocity()
-			local maxSpeed = CLASS_MAX_SPEEDS[playerClass] or 320
-
-			-- Use the proper helper function for direction detection (DRY)
-			local cornerOptions = get_best_corners_or_origin(my_pos, enemy_pos, combinedHitbox, 82)
-
-			-- Target points use combinedHitbox + 1 unit buffer (for collision safety)
-			local cornerDist = combinedHitbox + 1
-
-			-- Get left/right corners and scale to distance (use helper for DRY)
-			local leftCorner = cornerOptions[2] or Vector3(-1, 0, 0)
-			local rightCorner = cornerOptions[3] or Vector3(1, 0, 0)
-			local leftOffset = scale_corner_to_distance(leftCorner, cornerDist)
-			local rightOffset = scale_corner_to_distance(rightCorner, cornerDist)
-
-			-- DEPTH 2 scoring: simulate reaching first point, then find next optimal
-			-- This prevents getting stuck at left/right - continues circling to back
-
-			-- Helper: simulate walking in wishdir for N ticks, return end position
-			-- Also tracks wall collisions - returns ticksBeforeWall (more = better, open space)
-			local function SimulateWalk(startPos, startVel, wishdir, ticks)
-				local pos = Vector3(startPos.x, startPos.y, startPos.z)
-				local simVel = Vector3(startVel.x, startVel.y, startVel.z)
-				local tick_interval = globals.TickInterval()
-				local ticksBeforeWall = ticks -- Assume no wall hit
-
-				-- Use actual current speed if higher than class max (speed buffs)
-				local actualSpeed = math.sqrt(startVel.x * startVel.x + startVel.y * startVel.y)
-				local effectiveMaxSpeed = math.max(maxSpeed, actualSpeed)
-
-				-- Get player hull for traces
-				local mins = myMins or Vector3(-24, -24, 0)
-				local maxs = myMaxs or Vector3(24, 24, 82)
-
-				for i = 1, ticks do
-					-- Accelerate toward wishdir
-					local currentSpeed = simVel:Dot(wishdir)
-					local addSpeed = effectiveMaxSpeed - currentSpeed
-					if addSpeed > 0 then
-						local accelSpeed = math.min(TF2_ACCEL * effectiveMaxSpeed * tick_interval, addSpeed)
-						simVel = simVel + wishdir * accelSpeed
-					end
-					-- Cap speed (only to effective max, preserves buffs)
-					local horizSpeed = math.sqrt(simVel.x * simVel.x + simVel.y * simVel.y)
-					if horizSpeed > effectiveMaxSpeed then
-						local scale = effectiveMaxSpeed / horizSpeed
-						simVel = Vector3(simVel.x * scale, simVel.y * scale, simVel.z)
-					end
-					-- Friction
-					simVel = ApplyFriction(simVel, true)
-
-					-- Calculate next position
-					local nextPos = pos + simVel * tick_interval
-
-					-- Wall collision check (forward trace)
-					local wallTrace = engine.TraceHull(pos, nextPos, mins, maxs, MASK_PLAYERSOLID_BRUSHONLY)
-					if wallTrace.fraction < 1.0 then
-						-- Hit a wall - record when and handle sliding
-						if ticksBeforeWall == ticks then
-							ticksBeforeWall = i -- First wall hit
-						end
-						-- Slide along wall (remove velocity into wall)
-						local normal = wallTrace.plane
-						if normal then
-							local dot = simVel:Dot(normal)
-							if dot < 0 then
-								simVel = simVel - normal * dot
-							end
-						end
-						pos = wallTrace.endpos
-
-						-- EARLY TERMINATION: Stop if sliding speed drops below 5 units/tick
-						local slideSpeed = math.sqrt(simVel.x * simVel.x + simVel.y * simVel.y)
-						if slideSpeed < 37 then
-							ticksBeforeWall = i -- Record where we got stuck
-							break -- No point simulating further
-						end
-					else
-						pos = nextPos
-					end
-				end
-				return pos, simVel, ticksBeforeWall
-			end
-
-			-- CalculateOptimalWishdir handles the +450 extension internally
-			-- Pass raw offsets - extension is done FROM our position TO target
-
+		if withinBackAngle then
+			-- Behind enemy - go toward back (center)
 			local backDir = Normalize(TargetPlayer.Back)
-			local backOffset = backDir * (combinedHitbox + 1)
+			local targetPos = enemy_pos + backDir * (combinedHitbox + 10)
+			dir = targetPos - my_pos
+		else
+			-- In front/side - go LEFT or RIGHT
+			local toEnemy = Normalize(enemy_pos - my_pos)
+			local leftDir = Vector3(-toEnemy.y, toEnemy.x, 0)
+			local rightDir = Vector3(toEnemy.y, -toEnemy.x, 0)
+			local backDir = Normalize(TargetPlayer.Back)
 
-			-- Calculate LEFT path with wall collision tracking
-			local leftWishdir =
-				CalculateOptimalWishdir(my_pos, vel, leftOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
-			local leftPos1, leftVel1, leftWall1 = SimulateWalk(my_pos, vel, leftWishdir, 12)
-			local leftWishdir2 =
-				CalculateOptimalWishdir(leftPos1, leftVel1, backOffset, enemy_pos, 12, maxSpeed, combinedHitbox, 82)
-			local leftPos2, _, leftWall2 = SimulateWalk(leftPos1, leftVel1, leftWishdir2, 12)
-			local leftYaw = NormalizeYaw(PositionYaw(enemy_pos, leftPos2))
-			local leftYawDiff = math.abs(NormalizeYaw(leftYaw - enemyBackYaw))
-			local leftOpenSpace = leftWall1 + leftWall2 -- Total ticks before wall (higher = more open)
-
-			-- Calculate RIGHT path with wall collision tracking
-			local rightWishdir =
-				CalculateOptimalWishdir(my_pos, vel, rightOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
-			local rightPos1, rightVel1, rightWall1 = SimulateWalk(my_pos, vel, rightWishdir, 12)
-			local rightWishdir2 =
-				CalculateOptimalWishdir(rightPos1, rightVel1, backOffset, enemy_pos, 12, maxSpeed, combinedHitbox, 82)
-			local rightPos2, _, rightWall2 = SimulateWalk(rightPos1, rightVel1, rightWishdir2, 12)
-			local rightYaw = NormalizeYaw(PositionYaw(enemy_pos, rightPos2))
-			local rightYawDiff = math.abs(NormalizeYaw(rightYaw - enemyBackYaw))
-			local rightOpenSpace = rightWall1 + rightWall2
-
-			-- Score function
-			local function ScorePath(yawDiff, openSpace)
-				-- Lower score = better. Penalize wall hits heavily
-				return yawDiff + (24 - openSpace) * 10
-			end
-
-			local leftScore = ScorePath(leftYawDiff, leftOpenSpace)
-			local rightScore = ScorePath(rightYawDiff, rightOpenSpace)
-
-			-- OPTIMIZATION: Only simulate CENTER if:
-			-- 1. LEFT or RIGHT hit a wall, AND
-			-- 2. We're within 90° of enemy's back (no point warping to back if we're in front)
-			local centerWishdir, centerScore
-			local eitherHitWall = leftOpenSpace < 24 or rightOpenSpace < 24
-
-			-- Check our yaw delta from enemy's back
-			local ourYawToEnemy = NormalizeYaw(PositionYaw(enemy_pos, my_pos))
-			local ourYawDeltaFromBack = math.abs(NormalizeYaw(ourYawToEnemy - enemyBackYaw))
-			local withinBackAngle = ourYawDeltaFromBack <= 90
-
-			if eitherHitWall and withinBackAngle then
-				local centerOffset = backDir * (combinedHitbox + 1)
-				centerWishdir =
-					CalculateOptimalWishdir(my_pos, vel, centerOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
-				local centerPos1, centerVel1, centerWall1 = SimulateWalk(my_pos, vel, centerWishdir, 12)
-				local centerWishdir2 = CalculateOptimalWishdir(
-					centerPos1,
-					centerVel1,
-					backOffset,
-					enemy_pos,
-					12,
-					maxSpeed,
-					combinedHitbox,
-					82
-				)
-				local centerPos2, _, centerWall2 = SimulateWalk(centerPos1, centerVel1, centerWishdir2, 12)
-				local centerYaw = NormalizeYaw(PositionYaw(enemy_pos, centerPos2))
-				local centerYawDiff = math.abs(NormalizeYaw(centerYaw - enemyBackYaw))
-				local centerOpenSpace = centerWall1 + centerWall2
-				centerScore = ScorePath(centerYawDiff, centerOpenSpace)
-			else
-				-- No wall hit - center not needed, give it worst score
-				centerScore = math.huge
-			end
-
-			-- Pick direction to CIRCLE toward
-			local wishdir
+			-- Manual direction override (A/D keys)
 			local userSideMove = cmd:GetSideMove()
+			local forcedSide = nil
+			if Menu.Advanced.ManualDirection and math.abs(userSideMove) >= TF2.MANUAL_THRESHOLD then
+				forcedSide = (userSideMove > 0) and "right" or "left"
+			end
 
-			-- STAIRSTAB OVERRIDE: Force center when height diff >= 82 units
-			if isStairstab then
-				-- Stairstab - only center direction makes sense
-				if centerWishdir then
-					wishdir = centerWishdir
-				else
-					-- Fallback: calculate center wishdir if not computed yet
-					local backDir = Normalize(TargetPlayer.Back)
-					local centerOffset = backDir * (combinedHitbox + 1)
-					wishdir =
-						CalculateOptimalWishdir(my_pos, vel, centerOffset, enemy_pos, 24, maxSpeed, combinedHitbox, 82)
-				end
-			-- Manual override: TF2 sidemove: positive = right (D key), negative = left (A key)
-			elseif Menu.Advanced.ManualDirection then
-				if userSideMove >= 400 then
-					wishdir = rightWishdir
-				elseif userSideMove <= -400 then
-					wishdir = leftWishdir
-				else
-					-- Auto pick best score
-					if leftScore <= rightScore and leftScore <= centerScore then
-						wishdir = leftWishdir
-					elseif rightScore <= centerScore then
-						wishdir = rightWishdir
-					else
-						wishdir = centerWishdir
-					end
-				end
+			-- Pick primary side: manual override > better alignment to back
+			local primarySide, alternateSide
+			if forcedSide then
+				primarySide = (forcedSide == "right") and rightDir or leftDir
+				alternateSide = (forcedSide == "right") and leftDir or rightDir
 			else
-				-- Auto mode: pick best score (open space + yaw)
-				if leftScore <= rightScore and leftScore <= centerScore then
-					wishdir = leftWishdir
-				elseif rightScore <= centerScore then
-					wishdir = rightWishdir
+				-- Auto: pick side closer to enemy's back
+				local leftDot = leftDir:Dot(backDir)
+				local rightDot = rightDir:Dot(backDir)
+				if rightDot >= leftDot then
+					primarySide, alternateSide = rightDir, leftDir
 				else
-					wishdir = centerWishdir
+					primarySide, alternateSide = leftDir, rightDir
 				end
 			end
 
-			-- MoveAssistance continuously circles enemy (footwork only, no camera snap)
-			FakelagOn()
-			WalkInDirection(cmd, wishdir, true) -- forceNoSnap = true
+			-- Check if primary direction hits a wall (short trace)
+			local testDist = combinedHitbox + 50
+			local testEnd = my_pos + primarySide * testDist
+			local wallTrace = engine.TraceLine(my_pos, testEnd, MASK_PLAYERSOLID_BRUSHONLY)
+
+			local sideDir
+			if wallTrace.fraction < 0.5 then
+				-- Primary blocked, use alternate
+				sideDir = alternateSide
+			else
+				sideDir = primarySide
+			end
+
+			-- Blend: 70% side + 30% toward enemy
+			dir = Normalize(sideDir * 0.7 + toEnemy * 0.3)
 		end
 	end
-	::skip_assistance::
 
-	-- Ensure we have a valid warp target position for AutoWalk and AutoWarp
-	if BackstabPos ~= emptyVec and minWarpTicks then
-		-- Check if we can CURRENTLY backstab (from our current position)
-		local canCurrentlyBackstab = CanBackstabFromPos(pLocalPos)
+	-- Check if we can CURRENTLY backstab
+	local canCurrentlyBackstab = CanBackstabFromPos(pLocalPos)
 
-		-- Check if WARP would result in backstab (at BackstabPos) - includes LOS check
-		local warpWouldBackstab = CanBackstabFromPos(BackstabPos)
+	-- Backstab point tracking
+	local backstabPointCount = totalBackstabPoints or 0
+	local hasStabPoints = backstabPointCount > 0
+	local minPointsThreshold = Menu.Advanced.MinBackstabPoints or TF2.MIN_BACKSTAB_POINTS
+	local hasEnoughBackstabPoints = backstabPointCount >= minPointsThreshold
 
-		-- Check if warp is ready
-		local warpReady = warp.CanWarp() and warp.GetChargedTicks() >= 23 and not warp.IsWarping()
+	-- Check if warp is ready
+	local warpReady = warp.CanWarp() and warp.GetChargedTicks() >= TF2.WARP_READY_TICKS and not warp.IsWarping()
+	local warpWouldBackstab = BackstabPos ~= emptyVec and CanBackstabFromPos(BackstabPos)
 
-		-- Direction to walk - MUST use bestDirection from simulation to align!
-		-- If no bestDirection yet, fall back to direct path
-		local dir = bestDirection or (BackstabPos - pLocalPos)
+	-- AutoWalk takes priority over MoveAssistance (has angle snap + backstab point requirement)
+	local autoWalkActive = Menu.Main.AutoWalk and hasStabPoints and not canCurrentlyBackstab
 
-		-- Count backstab points across ALL simulated paths (combined total)
-		local backstabPointCount = totalBackstabPoints or 0
-		local hasAnyBackstabPoints = backstabPointCount > 0
-		local minPointsThreshold = Menu.Advanced.MinBackstabPoints or 3
-		local hasEnoughBackstabPoints = backstabPointCount >= minPointsThreshold
+	-- Skip walking when angle snap enabled but no user input (still simulate for visuals)
+	local canWalk = not Menu.Advanced.UseAngleSnap or hasUserInput
 
-		-- PRIORITY 1: AutoWalk - Walk to optimal side (left/right) when stab points exist
-		-- Requires at least 1 backstab point to confirm simulation found valid path
-		if Menu.Main.AutoWalk and not canCurrentlyBackstab and hasAnyBackstabPoints then
-			FakelagOn()
+	-- PRIORITY 0: Movement Assistance - Walk in simulation direction (no warp/point requirements)
+	-- Skipped if AutoWalk is active (AutoWalk has more features like angle snap)
+	if Menu.Main.MoveAsistance and dir and not canCurrentlyBackstab and not autoWalkActive and canWalk then
+		FakelagOn()
+		WalkInDirection(cmd, dir, true) -- forceNoSnap = true (footwork only)
+	end
 
-			-- FIRST: Snap view angles to backstab position (so warp will work correctly)
-			if Menu.Advanced.UseAngleSnap and BackstabPos and BackstabPos ~= emptyVec then
-				local lookAngles = PositionAngles(pLocalPos, BackstabPos)
-				if lookAngles then
-					cmd:SetViewAngles(lookAngles.pitch, lookAngles.yaw, 0)
-					engine.SetViewAngles(EulerAngles(lookAngles.pitch, lookAngles.yaw, 0))
-				end
+	-- PRIORITY 1: AutoWalk - Walk to optimal side when stab points exist (has angle snap)
+	if autoWalkActive and dir and canWalk then
+		FakelagOn()
+
+		-- Snap view angles to backstab position (so warp will work correctly)
+		if Menu.Advanced.UseAngleSnap and BackstabPos ~= emptyVec then
+			local lookAngles = PositionAngles(pLocalPos, BackstabPos)
+			if lookAngles then
+				cmd:SetViewAngles(lookAngles.pitch, lookAngles.yaw, 0)
+				engine.SetViewAngles(EulerAngles(lookAngles.pitch, lookAngles.yaw, 0))
 			end
-
-			-- THEN: Walk toward the optimal direction (footwork)
-			WalkInDirection(cmd, dir, not Menu.Advanced.UseAngleSnap) -- forceNoSnap if angle snap disabled
-			-- Don't return yet - check if we should also warp
 		end
 
-		-- PRIORITY 2: Auto Warp - Only warp when ENOUGH points to pick best position
-		-- 1. Warp is ready
-		-- 2. Warp GUARANTEES backstab
-		-- 3. Not already in backstab range
-		-- 4. Found ENOUGH backstab points (threshold ensures confidence in best pick)
+		-- Walk toward the optimal direction
+		WalkInDirection(cmd, dir, not Menu.Advanced.UseAngleSnap)
+	end
 
-		if
-			Menu.Main.AutoWarp
-			and warpWouldBackstab
-			and warpReady
-			and not canCurrentlyBackstab
-			and hasEnoughBackstabPoints
-			and bestDirection
-		then
-			-- Use exact ticks from simulation (already optimal)
-			local warpTicks = minWarpTicks
+	-- PRIORITY 2: Auto Warp - Only warp when ENOUGH points to pick best position
+	if
+		Menu.Main.AutoWarp
+		and warpWouldBackstab
+		and warpReady
+		and not canCurrentlyBackstab
+		and hasEnoughBackstabPoints
+		and bestDirection
+	then
+		PerformControlledWarp(cmd, bestDirection, minWarpTicks)
+		return
+	end
 
-			-- Perform the controlled warp using the EXACT direction from simulation
-			-- This direction was tested and led to the best backstab position
-			PerformControlledWarp(cmd, bestDirection, warpTicks)
-			return
-		end
-
-		-- Default: Fake lag management
-		if canCurrentlyBackstab then
-			FakelagOn() -- Close enough, hold position
-		else
-			FakelagOff()
-		end
-	else
-		FakelagOff() -- Disable fake lag if no action needed (no valid backstab position)
+	-- Default: Fake lag management
+	if canCurrentlyBackstab then
+		FakelagOn()
+	elseif not Menu.Main.MoveAsistance and not autoWalkActive then
+		FakelagOff()
 	end
 end
 
@@ -1845,33 +1763,24 @@ local Latency = 0
 local lerp = 0
 -- Main function to control the create move process and use AutoWarp and SimulateAttack effectively
 local function OnCreateMove(cmd)
+	-- ALWAYS clear visuals at start of EVERY tick (before any early returns)
+	positions = {}
+	endwarps = {}
+	pathHitWall = {}
+
 	if not Menu.Main.Active then
-		-- Clear visuals when script is inactive
-		positions = {}
-		endwarps = {}
 		return
 	end
 
 	-- Check activation mode (Always, On Hold, On Release, Toggle, On Click)
 	if not ShouldActivateTrickstab() then
-		-- Clear visuals when key not held
-		positions = {}
-		endwarps = {}
 		return
 	end
 
-	-- Angle snap mode requires user input to work (abuses player's own input for direction)
-	if Menu.Advanced.UseAngleSnap then
-		local fwd = cmd:GetForwardMove()
-		local side = cmd:GetSideMove()
-		if fwd == 0 and side == 0 then
-			return -- No user input, can't angle snap
-		end
-	end
-
-	-- Reset tables for storing positions and backstab states
-	positions = {} -- Stores all tick positions for visualization
-	endwarps = {} -- Stores warp data for each tick, including backstab status
+	-- Track if user has movement input (for angle snap mode)
+	local fwd = cmd:GetForwardMove()
+	local side = cmd:GetSideMove()
+	local hasUserInput = (fwd ~= 0 or side ~= 0)
 
 	-- Use NetChannel for latency (not deprecated)
 	local netChan = clientstate.GetNetChannel()
@@ -1892,7 +1801,12 @@ local function OnCreateMove(cmd)
 	end
 
 	-- Auto recharge logic: Recharge when kill/hurt confirmed or ping-based cooldown after warp
-	if Menu.Advanced.AutoRecharge and not warp.IsWarping() and warp.GetChargedTicks() < 24 and not warp.CanWarp() then
+	if
+		Menu.Advanced.AutoRecharge
+		and not warp.IsWarping()
+		and warp.GetChargedTicks() < TF2.AUTO_RECHARGE_THRESHOLD
+		and not warp.CanWarp()
+	then
 		local shouldRecharge = false
 
 		-- Check 1: Got kill/hurt confirmation (immediate recharge)
@@ -1904,8 +1818,8 @@ local function OnCreateMove(cmd)
 		if warpExecutedTick > 0 then
 			local currentTick = globals.TickCount()
 			local ticksSinceWarp = currentTick - warpExecutedTick
-			-- Use latency-based cooldown: Latency in ticks + 5 tick buffer
-			local pingCooldown = math.max(7, (Latency or 0) + 5)
+			-- Use latency-based cooldown: Latency in ticks + buffer
+			local pingCooldown = math.max(TF2.MIN_PING_COOLDOWN, (Latency or 0) + TF2.PING_BUFFER_TICKS)
 			if ticksSinceWarp >= pingCooldown then
 				shouldRecharge = true
 			end
@@ -1934,19 +1848,16 @@ local function OnCreateMove(cmd)
 		return
 	end
 
-	-- Check if keybind should activate trickstab logic
-	if not ShouldActivateTrickstab() then
-		return
-	end
-
 	TargetPlayer = UpdateTarget()
 	if not TargetPlayer or not TargetPlayer.entity then
 		-- No valid target - update cache for next tick
+		positions = {}
+		endwarps = {}
 		UpdateSimulationCache()
 	else
 		-- Valid target - run trickstab logic
 		UpdateSimulationCache() -- Keep cache fresh
-		AutoWarp(cmd)
+		AutoWarp(cmd, hasUserInput)
 	end
 end
 
@@ -2070,9 +1981,14 @@ local function doDraw()
 					goto continue_path
 				end
 
-				-- Path colors: Path 1 = Green (optimal), Path 2 = Orange (other side), Path 3 = Cyan (center)
+				-- Check if this path hit a wall (RED = failed, others = normal colors)
+				local hitWall = pathHitWall and pathHitWall[pathIdx]
+
+				-- Path colors: RED if hit wall, otherwise: Path 1 = Green, Path 2 = Orange, Path 3 = Cyan
 				local baseR, baseG, baseB
-				if pathIdx == 1 then
+				if hitWall then
+					baseR, baseG, baseB = 255, 0, 0 -- RED for failed paths (hit wall)
+				elseif pathIdx == 1 then
 					baseR, baseG, baseB = 0, 255, 0 -- Green for optimal side
 				elseif pathIdx == 2 then
 					baseR, baseG, baseB = 255, 150, 0 -- Orange for other side
@@ -2152,10 +2068,10 @@ local function doDraw()
 				for i = 0, 360, 30 do
 					local rad = math.rad(i)
 					local nextRad = math.rad(i + 30)
-					local x1 = math.floor(screenPos[1] + math.cos(rad) * 8)
-					local y1 = math.floor(screenPos[2] + math.sin(rad) * 8)
-					local x2 = math.floor(screenPos[1] + math.cos(nextRad) * 8)
-					local y2 = math.floor(screenPos[2] + math.sin(nextRad) * 8)
+					local x1 = math.floor(screenPos[1] + math.cos(rad) * TF2.HITBOX_RADIUS / 3)
+					local y1 = math.floor(screenPos[2] + math.sin(rad) * TF2.HITBOX_RADIUS / 3)
+					local x2 = math.floor(screenPos[1] + math.cos(nextRad) * TF2.HITBOX_RADIUS / 3)
+					local y2 = math.floor(screenPos[2] + math.sin(nextRad) * TF2.HITBOX_RADIUS / 3)
 					draw.Line(x1, y1, x2, y2)
 				end
 				-- Center dot
@@ -2190,9 +2106,9 @@ local function doDraw()
 			if shouldShowCircle then
 				local centerPOS = pLocal:GetAbsOrigin() -- Center of the circle at the player's feet
 				local viewPos = pLocalViewPos -- View position to shoot traces from
-				local radius = 220 -- Radius of the circle
+				local radius = TF2.ATTACK_RANGE - 5 -- Slightly less than attack range
 				local segments = 32 -- Number of segments to draw the circle
-				local angleStep = (2 * math.pi) / segments
+				local angleStep = MATH.TWO_PI / segments
 
 				-- Set the drawing color based on TargetPlayer's presence
 				local circleColor = TargetPlayer and { 0, 255, 0, 255 } or { 255, 255, 255, 255 } -- Green if TargetPlayer exists, otherwise white
@@ -2225,7 +2141,7 @@ local function doDraw()
 			local hitboxPos = TargetPlayer.viewpos
 
 			-- Calculate end point of the line in the backward direction
-			local lineLength = 50 -- Length of the line, adjust as needed
+			local lineLength = TF2.HITBOX_RADIUS * 2 -- Length based on player size
 			local endPoint = hitboxPos + (Back * lineLength) -- Move in the backward direction
 
 			-- Convert 3D points to screen space
