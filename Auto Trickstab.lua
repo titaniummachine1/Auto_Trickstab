@@ -61,6 +61,10 @@ local Menu = { -- this is the config that will be loaded every time u load the s
 		AdvancedPred = true, -- Enable advanced trace validation for range checks
 		ManualDirection = false, -- Manual movement direction control
 		AutoRecharge = true, -- Auto recharge warp after kill/hurt
+		AntiBackstabResolver = false, -- Force cheater view angles to look at us (HvH mode)
+		HelperSprint = true, -- Sprint + smooth warp when close to backstab (within 10 deg, 66 units)
+		FakelagOnDirectionChange = true, -- Use fakelag when switching direction to confuse enemy
+		SmoothWarp = false, -- Enable smooth warp bonus ticks (experimental)
 	},
 
 	Visuals = {
@@ -80,6 +84,7 @@ local emptyVec = Vector3(0, 0, 0)
 local TF2 = {
 	-- Melee combat
 	BACKSTAB_RANGE = 66, -- Hammer units for knife reach
+	MELEE_HIT_RANGE = 225, -- Max distance to hit with melee (for target filtering)
 	BACKSTAB_ANGLE = 90, -- Degrees for valid backstab
 	SWING_HULL_SIZE = 38, -- Melee swing detection hull
 
@@ -145,6 +150,49 @@ local HULL = {
 	SWING_MIN = Vector3(-19, -19, -19), -- Half of 38
 	SWING_MAX = Vector3(19, 19, 19),
 }
+
+-- Client frame stages for FrameStageNotify
+local E_ClientFrameStage = {
+	FRAME_NET_UPDATE_END = 4, -- When network props are updated
+}
+
+-- Playerlist priority for cheaters
+local CHEATER_PRIORITY = 10
+
+-- Input button flags
+local IN_ATTACK = 1
+local IN_SPEED = 131072 -- Sprint button (bit 17)
+
+-- Direction rate limiting
+local DIRECTION_CHANGE_COOLDOWN = 11 -- Ticks between direction changes (10 times/sec max)
+local lastDirectionChangeTick = 0
+local lastDirection = nil
+
+-- Position history for lag compensation (1 second = 66 ticks at 66 tick server)
+local POSITION_HISTORY_SIZE = 66
+local positionHistory = {} -- Array of {tick, pos, time}
+local currentTick = 0
+
+-- Enemy angle tracking for smooth resolver
+local enemyAngleCache = {} -- [steamID] = {yaw, lastUpdate}
+
+-- Smooth warp integration (extends main warp by 3 bonus ticks)
+local SMOOTH_WARP = {
+	BONUS_TICKS = 3, -- Max extra ticks after main warp (server kicks on 4th)
+	RESERVE_TICKS = 3, -- Always reserve this many for main warp bonus
+	ASSIST_ANGLE_THRESHOLD = 10, -- Use smooth warp when backstab angle within this many degrees
+	NEW_COMMANDS_SIZE = 4, -- Bits for new_commands in CLC_Move
+	BACKUP_COMMANDS_SIZE = 3, -- Bits for backup_commands in CLC_Move
+	CLC_MOVE_TYPE = 9, -- NetMessage type for CLC_Move
+}
+
+-- Smooth warp state
+local smoothWarpTicks = 0 -- Accumulated smooth warp ticks
+local smoothWarpActive = false -- Currently using smooth warp for movement assist
+local smoothWarpBonusActive = false -- Using 3 bonus ticks after main warp
+local smoothWarpDirection = nil -- Direction for smooth warp movement
+local smoothWarpDestination = nil -- Target position for smooth warp
+local lastSmoothWarpRecharge = 0 -- Last tick we recharged
 
 -- Class speed mappings
 local CLASS_MAX_SPEEDS = {
@@ -509,6 +557,7 @@ end
 
 local positions = {}
 local pathHitWall = {} -- Track which paths hit walls (for red color visualization)
+local smoothWarpPositions = {} -- Store 3 bonus smooth warp tick positions (magenta visualization)
 -- Function to update the cache for the local player and loadout slot
 local function UpdateLocalPlayerCache()
 	pLocal = entities.GetLocalPlayer()
@@ -536,6 +585,54 @@ local function UpdateLocalPlayerCache()
 	return pLocal
 end
 
+-- Check if we can hit a specific enemy with melee (LOS check at MELEE_HIT_RANGE)
+-- Used for target filtering - returns false if world geometry blocks the path
+local function CanHitEnemy(enemyEntity, enemyPos)
+	if not pLocal or not enemyEntity or not enemyPos then
+		return false
+	end
+
+	-- Calculate view position directly (don't rely on pLocalViewPos which may not be set yet)
+	local myPos = pLocal:GetAbsOrigin()
+	if not myPos then
+		return false
+	end
+	local viewPos = myPos + pLocalViewOffset
+
+	-- Direction to enemy center
+	local dirToEnemy = enemyPos - viewPos
+	local distToEnemy = dirToEnemy:Length()
+
+	-- Too far = can't hit
+	if distToEnemy > TF2.MELEE_HIT_RANGE then
+		return false
+	end
+
+	-- Very close = can hit
+	if distToEnemy < 10 then
+		return true
+	end
+
+	-- Normalize direction
+	local direction = dirToEnemy / distToEnemy
+	local traceEnd = viewPos + direction * TF2.MELEE_HIT_RANGE
+
+	-- Line trace first (faster)
+	local lineTrace = engine.TraceLine(viewPos, traceEnd, MASK_PLAYERSOLID_BRUSHONLY)
+	if lineTrace.fraction >= 0.95 or lineTrace.entity == enemyEntity then
+		return true -- Clear path or hit the enemy
+	end
+
+	-- Hull trace for melee swing
+	local hullTrace = engine.TraceHull(viewPos, traceEnd, HULL.SWING_MIN, HULL.SWING_MAX, MASK_PLAYERSOLID_BRUSHONLY)
+	if hullTrace.fraction >= 0.95 or hullTrace.entity == enemyEntity then
+		return true -- Clear path or hit the enemy
+	end
+
+	-- Both traces blocked by world = can't reach
+	return false
+end
+
 local function UpdateTarget()
 	-- Safety check: ensure pLocal exists
 	if not pLocal or not pLocal:IsValid() then
@@ -549,7 +646,7 @@ local function UpdateTarget()
 
 	local bestTargetDetails = nil
 	local bestScore = -math.huge
-	local maxAttackDistance = TF2.ATTACK_RANGE
+	local maxAttackDistance = TF2.MELEE_HIT_RANGE -- Only target enemies within melee hit range
 	local ignoreinvisible = (gui.GetValue("ignore cloaked"))
 
 	for _, player in pairs(allPlayers) do
@@ -586,6 +683,11 @@ local function UpdateTarget()
 
 		-- Skip if too far
 		if distance >= maxAttackDistance then
+			goto continue
+		end
+
+		-- Skip if we can't hit this enemy (world geometry blocks the path)
+		if not CanHitEnemy(player, playerPos) then
 			goto continue
 		end
 
@@ -1483,6 +1585,37 @@ local function CalculateTrickstab(cmd)
 	endwarps = allEndwarps
 	pathHitWall = allHitWall
 
+	-- Calculate 3 bonus smooth warp tick positions from best path end
+	-- Only show when SmoothWarp is enabled - each tick recalculates optimal direction to enemy back
+	smoothWarpPositions = {}
+	if Menu.Advanced.SmoothWarp and #allPaths > 0 then
+		local bestPath = allPaths[1] -- First path is optimal
+		if bestPath and #bestPath > 0 then
+			local endPos = bestPath[#bestPath]
+			if endPos then
+				local spySpeed = CLASS_MAX_SPEEDS[8] or 320 -- Spy speed
+				local tickInterval = globals.TickInterval() or (1 / 66)
+				local movePerTick = spySpeed * tickInterval
+
+				-- Calculate 3 bonus tick positions - each tick recalculates direction to enemy back
+				local currentPos = Vector3(endPos.x, endPos.y, endPos.z)
+				for i = 1, SMOOTH_WARP.BONUS_TICKS do
+					-- Target: enemy back position (recalculated each tick for optimal pathing)
+					local targetPos = enemy_pos + TargetPlayer.Back * (myRadius + enemyRadius)
+
+					-- Direction from CURRENT position to enemy back
+					local toTarget = targetPos - currentPos
+					local toTargetLen = toTarget:Length()
+					if toTargetLen > 1 then
+						local dir = toTarget / toTargetLen
+						currentPos = currentPos + dir * movePerTick
+						table.insert(smoothWarpPositions, Vector3(currentPos.x, currentPos.y, currentPos.z))
+					end
+				end
+			end
+		end
+	end
+
 	-- Only set fallback direction if we found at least some backstab points
 	-- If no backstab points at all, leave bestDirection nil so MoveAssistance uses simple approach
 	if not bestDirection and totalBackstabPoints > 0 then
@@ -1507,6 +1640,15 @@ local warpExecutedTick = 0
 local warpConfirmed = false -- Kill or hurt confirmed
 local lastAttackedTarget = nil
 
+-- Get max server ticks for smooth warp (forward declaration for damageLogger)
+local function GetSmoothWarpMaxTicks()
+	local sv_max = client.GetConVar("sv_maxusrcmdprocessticks")
+	if sv_max and sv_max > 0 then
+		return sv_max
+	end
+	return 24
+end
+
 local function damageLogger(event)
 	local eventName = event:GetName()
 
@@ -1519,10 +1661,12 @@ local function damageLogger(event)
 		local attacker = entities.GetByUserID(event:GetInt("attacker"))
 		local victim = entities.GetByUserID(event:GetInt("userid"))
 
-		-- We got a kill - allow recharge
+		-- We got a kill - allow recharge for both main warp and smooth warp
 		if attacker and attacker:IsValid() and pLocal:GetIndex() == attacker:GetIndex() then
 			warpConfirmed = true
 			lastAttackedTarget = nil
+			-- Also recharge smooth warp to max
+			smoothWarpTicks = GetSmoothWarpMaxTicks()
 		end
 	elseif eventName == "player_hurt" then
 		pLocal = entities:GetLocalPlayer()
@@ -1532,23 +1676,237 @@ local function damageLogger(event)
 
 		local attacker = entities.GetByUserID(event:GetInt("attacker"))
 
-		-- We hurt someone - allow recharge
+		-- We hurt someone - allow recharge for both main warp and smooth warp
 		if attacker and attacker:IsValid() and pLocal:GetIndex() == attacker:GetIndex() then
 			warpConfirmed = true
+			-- Also recharge smooth warp to max
+			smoothWarpTicks = GetSmoothWarpMaxTicks()
 		end
 	end
 end
 
-local function FakelagOn()
+--[[ Custom Blink Module - One-shot juke on direction change ]]
+-- Blink = appear to stand still for 22 ticks while actually moving
+-- Resets fresh on each direction change (stops old blink, starts new)
+local BLINK_DURATION = 22 -- Ticks to appear stationary
+local blinkTicksRemaining = 0 -- Countdown from 22 to 0
+local blinkShooting = false
+local blinkStartPos = nil -- Position where blink started (where enemy sees us)
+
+-- Reset blink to fresh 22 ticks (called on direction change)
+local function TriggerBlink()
 	if Menu.Main.AutoBlink then
-		gui.SetValue("fake lag", 1)
+		blinkTicksRemaining = BLINK_DURATION -- Fresh blink
+		-- Store current position as where enemy sees us
+		local pLocal = entities.GetLocalPlayer()
+		if pLocal and pLocal:IsAlive() then
+			local pos = pLocal:GetAbsOrigin()
+			blinkStartPos = pos and Vector3(pos.x, pos.y, pos.z) or nil
+		end
 	end
 end
 
-local function FakelagOff()
-	if Menu.Main.AutoBlink then
-		gui.SetValue("fake lag", 0)
+-- Custom blink using m_flAnimTime (hides position from enemy)
+local function UpdateBlink(cmd)
+	if not Menu.Main.AutoBlink then
+		blinkTicksRemaining = 0
+		blinkStartPos = nil
+		return
 	end
+
+	local pLocal = entities.GetLocalPlayer()
+	if not pLocal or not pLocal:IsAlive() then
+		blinkTicksRemaining = 0
+		blinkStartPos = nil
+		return
+	end
+
+	-- Check if we're shooting this tick
+	blinkShooting = (cmd:GetButtons() & IN_ATTACK) ~= 0
+
+	-- Blink active if we have ticks remaining
+	if blinkTicksRemaining > 0 then
+		-- Manipulate AnimTime to hide position (appear to stand still)
+		pLocal:SetPropFloat(globals.CurTime() + 1, "m_flAnimTime")
+
+		-- Choke packet if not shooting
+		if not blinkShooting then
+			cmd.sendpacket = false
+			blinkTicksRemaining = blinkTicksRemaining - 1
+		else
+			-- Shooting ends blink early (need to send attack)
+			blinkTicksRemaining = 0
+			blinkStartPos = nil
+		end
+	else
+		-- Blink ended, clear position
+		blinkStartPos = nil
+	end
+end
+
+-- Check if blink is active
+local function IsBlinkActive()
+	return blinkTicksRemaining > 0 and blinkStartPos ~= nil
+end
+
+-- Get blink start position (where enemy sees us)
+local function GetBlinkPosition()
+	return blinkStartPos
+end
+
+-- Legacy wrappers for compatibility (no longer needed but kept for code references)
+local function FakelagOn() end
+local function FakelagOff() end
+
+--[[ Smooth Warp Integration - Extends main warp with bonus ticks ]]
+
+-- Create CLC_Move packet with specified command count
+local function CreateSmoothWarpPacket(numCommands)
+	numCommands = numCommands or 2
+	local buffer = BitBuffer()
+	buffer:WriteInt(numCommands, SMOOTH_WARP.NEW_COMMANDS_SIZE)
+	buffer:WriteInt(1, SMOOTH_WARP.BACKUP_COMMANDS_SIZE) -- 1 backup for safety
+	buffer:Reset()
+	return buffer
+end
+
+-- Simulate 1 tick of coasting (no input) from position
+local function SimulateCoasting(fromPos, velocity)
+	if not fromPos or not velocity then
+		return fromPos
+	end
+
+	local tickInterval = globals.TickInterval() or (1 / 66)
+	local gravity = SV_GRAVITY or 800
+
+	-- Simple physics: pos += vel * dt, vel.z -= gravity * dt (if airborne)
+	local newVel = Vector3(velocity.x, velocity.y, velocity.z - gravity * tickInterval)
+	local newPos = fromPos + velocity * tickInterval
+
+	-- Ground check (simple)
+	local groundTrace =
+		engine.TraceHull(fromPos + Vector3(0, 0, 1), newPos, HULL.MIN, HULL.MAX, MASK_PLAYERSOLID_BRUSHONLY)
+	if groundTrace.fraction < 1.0 then
+		newPos = groundTrace.endpos
+	end
+
+	return newPos, newVel
+end
+
+-- Calculate direction from coasting position to destination
+local function GetSmoothWarpDirection(currentPos, currentVel, destination)
+	-- First simulate 1 tick of coasting
+	local coastPos = SimulateCoasting(currentPos, currentVel)
+	if not coastPos or not destination then
+		return nil
+	end
+
+	-- Direction from coasting position to destination
+	local dir = destination - coastPos
+	local len = dir:Length()
+	if len < 1 then
+		return nil
+	end
+
+	return dir
+end
+
+-- Check if we can use smooth warp (not choking, have ticks)
+local function CanSmoothWarp()
+	local choked = clientstate.GetChokedCommands()
+	return choked == 0 and smoothWarpTicks > 0
+end
+
+-- Recharge smooth warp ticks passively
+local function RechargeSmoothWarp()
+	local maxTicks = GetSmoothWarpMaxTicks()
+	local tickCount = globals.TickCount()
+
+	-- Passive recharge when standing still or slowly (every few ticks)
+	if tickCount > lastSmoothWarpRecharge + 3 then
+		if smoothWarpTicks < maxTicks then
+			smoothWarpTicks = smoothWarpTicks + 1
+			lastSmoothWarpRecharge = tickCount
+		end
+	end
+end
+
+-- Check if backstab angle is close (within threshold)
+local function IsBackstabAngleClose(angleDiff)
+	return angleDiff and angleDiff <= SMOOTH_WARP.ASSIST_ANGLE_THRESHOLD
+end
+
+-- Track remaining bonus ticks to send (1 per packet to avoid kick)
+local smoothWarpBonusRemaining = 0
+
+-- Handle smooth warp packet modification (called from SendNetMsg)
+-- IMPORTANT: Server kicks on 4th extra command in a row, so we send 1 extra per packet (2 total)
+local function HandleSmoothWarpPacket(msg)
+	if msg:GetType() ~= SMOOTH_WARP.CLC_MOVE_TYPE then
+		return
+	end
+
+	-- Check if we can modify (not choking)
+	local choked = clientstate.GetChokedCommands()
+	if choked > 0 then
+		return
+	end
+
+	-- Bonus warp after main warp - send 1 extra tick per packet (2 commands)
+	-- This fires over 3 consecutive packets to get all 3 bonus ticks
+	if smoothWarpBonusRemaining > 0 and smoothWarpTicks > 0 then
+		local buffer = CreateSmoothWarpPacket(2) -- 2 commands = 1 extra tick (safe)
+		msg:ReadFromBitBuffer(buffer)
+		buffer:Delete()
+		smoothWarpTicks = smoothWarpTicks - 1
+		smoothWarpBonusRemaining = smoothWarpBonusRemaining - 1
+		if smoothWarpBonusRemaining <= 0 then
+			smoothWarpBonusActive = false
+		end
+		return
+	end
+
+	-- Movement assist smooth warp (1 tick at a time)
+	if smoothWarpActive and smoothWarpTicks > SMOOTH_WARP.RESERVE_TICKS then
+		local buffer = CreateSmoothWarpPacket(2) -- 2 commands = 1 extra tick
+		msg:ReadFromBitBuffer(buffer)
+		buffer:Delete()
+		smoothWarpTicks = smoothWarpTicks - 1
+		return
+	end
+end
+
+-- Activate 3 bonus ticks after main warp (will send 1 per packet over 3 packets)
+local function ActivateSmoothWarpBonus(destination, direction)
+	if not Menu.Advanced.SmoothWarp then
+		return
+	end
+	if smoothWarpTicks >= SMOOTH_WARP.BONUS_TICKS then
+		smoothWarpBonusActive = true
+		smoothWarpBonusRemaining = SMOOTH_WARP.BONUS_TICKS -- 3 ticks to send
+		smoothWarpDestination = destination
+		smoothWarpDirection = direction
+	end
+end
+
+-- Activate smooth warp for movement assist (when close to backstab)
+local function ActivateSmoothWarpAssist(destination)
+	-- Only if enabled and we have ticks beyond reserve
+	if not Menu.Advanced.SmoothWarp then
+		return
+	end
+	if smoothWarpTicks > SMOOTH_WARP.RESERVE_TICKS then
+		smoothWarpActive = true
+		smoothWarpDestination = destination
+	else
+		smoothWarpActive = false
+	end
+end
+
+-- Deactivate smooth warp assist
+local function DeactivateSmoothWarpAssist()
+	smoothWarpActive = false
+	smoothWarpDestination = nil
 end
 
 -- Function to handle controlled warp using pre-calculated optimal direction
@@ -1572,6 +1930,12 @@ local function PerformControlledWarp(cmd, optimalDirection, warpTicks)
 
 	-- Track warp time for auto recharge cooldown
 	LastWarpTime = globals.RealTime()
+
+	-- Activate 3 bonus ticks after main warp (smooth warp extension)
+	-- These will fire on the next CLC_Move packets with direction toward backstab pos
+	if BackstabPos and BackstabPos ~= emptyVec then
+		ActivateSmoothWarpBonus(BackstabPos, optimalDirection)
+	end
 
 	-- Reset
 	client.SetConVar("sv_maxusrcmdprocessticks", 24, true)
@@ -1600,9 +1964,10 @@ local function OnKillRecharge(event)
 	-- Check if we are the attacker
 	local attackerEntity = entities.GetByUserID(attackerIdx)
 	if attackerEntity and attackerEntity:GetIndex() == localPlayer:GetIndex() then
-		-- We got a kill - instant recharge
+		-- We got a kill - instant recharge for main warp and smooth warp
 		warp.TriggerCharge()
 		LastWarpTime = 0
+		smoothWarpTicks = GetSmoothWarpMaxTicks()
 	end
 end
 
@@ -1625,6 +1990,42 @@ local function AutoWarp(cmd, hasUserInput)
 	local dir = bestDirection
 	if not dir and BackstabPos ~= emptyVec then
 		dir = BackstabPos - pLocalPos
+	end
+
+	-- Rate limit direction changes (max 10 times/sec = every 11 ticks)
+	local currentTickCount = globals.TickCount()
+	if dir then
+		local dirChanged = false
+		if lastDirection then
+			-- Check if direction changed significantly (>45 degrees)
+			local lastLen = lastDirection:Length()
+			local curLen = dir:Length()
+			if lastLen > 0 and curLen > 0 then
+				local dot = lastDirection:Dot(dir) / (lastLen * curLen)
+				dirChanged = dot < 0.7 -- ~45 degree change
+			end
+		else
+			dirChanged = true -- First direction
+		end
+
+		if dirChanged then
+			-- Check cooldown
+			if currentTickCount - lastDirectionChangeTick < DIRECTION_CHANGE_COOLDOWN then
+				-- Can't change yet - use last direction
+				if lastDirection then
+					dir = lastDirection
+				end
+			else
+				-- Allow change and update tracking
+				lastDirectionChangeTick = currentTickCount
+				lastDirection = Vector3(dir.x, dir.y, dir.z) -- Copy
+
+				-- Trigger blink on direction change to confuse enemy anti-aim
+				if Menu.Advanced.FakelagOnDirectionChange then
+					TriggerBlink()
+				end
+			end
+		end
 	end
 	-- Fallback: walk to LEFT or RIGHT side (NOT center/back when in front!)
 	if not dir and TargetPlayer and TargetPlayer.Pos and TargetPlayer.Back then
@@ -1714,17 +2115,77 @@ local function AutoWarp(cmd, hasUserInput)
 	-- Skip walking when angle snap enabled but no user input (still simulate for visuals)
 	local canWalk = not Menu.Advanced.UseAngleSnap or hasUserInput
 
+	-- Calculate how close we are to backstab angle (for smooth warp assist)
+	local backstabAngleDiff = nil
+	if TargetPlayer and TargetPlayer.Back and pLocalPos then
+		local enemyPos = TargetPlayer.Pos
+		local enemyBack = TargetPlayer.Back
+		if enemyPos and enemyBack then
+			-- Calculate angle between our position relative to enemy and their back direction
+			local toUs = pLocalPos - enemyPos
+			local toUsLen = toUs:Length()
+			local backLen = enemyBack:Length()
+			if toUsLen > 0 and backLen > 0 then
+				local dot = toUs:Dot(enemyBack) / (toUsLen * backLen)
+				backstabAngleDiff = math.deg(math.acos(math.max(-1, math.min(1, dot))))
+			end
+		end
+	end
+
+	-- Check if we're close to backstab angle (within threshold)
+	local closeToBackstab = backstabAngleDiff and backstabAngleDiff <= SMOOTH_WARP.ASSIST_ANGLE_THRESHOLD
+
+	-- Check distance to target for HelperSprint
+	local distanceToTarget = nil
+	if TargetPlayer and TargetPlayer.Pos and pLocalPos then
+		distanceToTarget = (TargetPlayer.Pos - pLocalPos):Length()
+	end
+	local withinBackstabRange = distanceToTarget and distanceToTarget <= TF2.BACKSTAB_RANGE
+
+	-- Passive smooth warp recharge
+	RechargeSmoothWarp()
+
+	-- Calculate smooth warp target: use BackstabPos if valid, otherwise enemy back
+	local smoothWarpTarget = BackstabPos
+	if
+		(not smoothWarpTarget or smoothWarpTarget == emptyVec)
+		and TargetPlayer
+		and TargetPlayer.Pos
+		and TargetPlayer.Back
+	then
+		-- Fallback to enemy back position
+		smoothWarpTarget = TargetPlayer.Pos + TargetPlayer.Back * TF2.BACKSTAB_RANGE
+	end
+
+	-- HelperSprint: Sprint + smooth warp when close to backstab (within 10 deg, 66 units)
+	local helperSprintActive = false
+	if Menu.Advanced.HelperSprint and closeToBackstab and withinBackstabRange and not canCurrentlyBackstab then
+		-- Enable sprint
+		local buttons = cmd:GetButtons()
+		cmd:SetButtons(buttons | IN_SPEED)
+		helperSprintActive = true
+
+		-- Use smooth warp to close the gap faster
+		if smoothWarpTarget and smoothWarpTarget ~= emptyVec then
+			ActivateSmoothWarpAssist(smoothWarpTarget)
+		end
+	end
+
 	-- PRIORITY 0: Movement Assistance - Walk in simulation direction (no warp/point requirements)
 	-- Skipped if AutoWalk is active (AutoWalk has more features like angle snap)
 	if Menu.Main.MoveAsistance and dir and not canCurrentlyBackstab and not autoWalkActive and canWalk then
-		FakelagOn()
 		WalkInDirection(cmd, dir, true) -- forceNoSnap = true (footwork only)
+
+		-- Use smooth warp to speed up movement when close to backstab (if not already via HelperSprint)
+		if not helperSprintActive and closeToBackstab and smoothWarpTarget and smoothWarpTarget ~= emptyVec then
+			ActivateSmoothWarpAssist(smoothWarpTarget)
+		elseif not helperSprintActive then
+			DeactivateSmoothWarpAssist()
+		end
 	end
 
 	-- PRIORITY 1: AutoWalk - Walk to optimal side when stab points exist (has angle snap)
 	if autoWalkActive and dir and canWalk then
-		FakelagOn()
-
 		-- Snap view angles to backstab position (so warp will work correctly)
 		if Menu.Advanced.UseAngleSnap and BackstabPos ~= emptyVec then
 			local lookAngles = PositionAngles(pLocalPos, BackstabPos)
@@ -1736,6 +2197,13 @@ local function AutoWarp(cmd, hasUserInput)
 
 		-- Walk toward the optimal direction
 		WalkInDirection(cmd, dir, not Menu.Advanced.UseAngleSnap)
+
+		-- Use smooth warp to speed up when close to backstab angle
+		if closeToBackstab and smoothWarpTarget and smoothWarpTarget ~= emptyVec then
+			ActivateSmoothWarpAssist(smoothWarpTarget)
+		else
+			DeactivateSmoothWarpAssist()
+		end
 	end
 
 	-- PRIORITY 2: Auto Warp - Only warp when ENOUGH points to pick best position
@@ -1751,12 +2219,7 @@ local function AutoWarp(cmd, hasUserInput)
 		return
 	end
 
-	-- Default: Fake lag management
-	if canCurrentlyBackstab then
-		FakelagOn()
-	elseif not Menu.Main.MoveAsistance and not autoWalkActive then
-		FakelagOff()
-	end
+	-- Blink is triggered by direction change, no need for legacy fakelag here
 end
 
 local Latency = 0
@@ -1767,6 +2230,7 @@ local function OnCreateMove(cmd)
 	positions = {}
 	endwarps = {}
 	pathHitWall = {}
+	smoothWarpPositions = {} -- Clear smooth warp bonus positions
 
 	if not Menu.Main.Active then
 		return
@@ -1854,11 +2318,15 @@ local function OnCreateMove(cmd)
 		positions = {}
 		endwarps = {}
 		UpdateSimulationCache()
+		-- Blink auto-ends when ticks run out, no need to disable
 	else
 		-- Valid target - run trickstab logic
 		UpdateSimulationCache() -- Keep cache fresh
 		AutoWarp(cmd, hasUserInput)
 	end
+
+	-- Update custom blink (m_flAnimTime manipulation)
+	UpdateBlink(cmd)
 end
 
 local consolas = draw.CreateFont("Consolas", 17, 500)
@@ -1871,6 +2339,19 @@ local function doDraw()
 	-- Update FPS every 100 frames
 	if globals.FrameCount() % 100 == 0 then
 		current_fps = math.floor(1 / globals.FrameTime())
+	end
+
+	-- Draw white rectangle where enemy sees us during blink
+	if IsBlinkActive() then
+		local blinkPos = GetBlinkPosition()
+		if blinkPos then
+			local screenPos = client.WorldToScreen(blinkPos)
+			if screenPos then
+				local sx, sy = math.floor(screenPos[1]), math.floor(screenPos[2])
+				draw.Color(255, 255, 255, 255)
+				draw.FilledRect(sx - 5, sy - 5, sx + 5, sy + 5)
+			end
+		end
 	end
 
 	if Menu.Visuals.Active and TargetPlayer and TargetPlayer.Pos then
@@ -2026,6 +2507,45 @@ local function doDraw()
 				end
 
 				::continue_path::
+			end
+		end
+
+		-- Visualize smooth warp bonus positions (3 extra ticks in MAGENTA)
+		-- These show direction change at end of warp toward backstab position
+		if Menu.Visuals.VisualizePoints and smoothWarpPositions and #smoothWarpPositions > 0 then
+			-- Get end of best path to connect from
+			local startPos = nil
+			if positions and positions[1] and #positions[1] > 0 then
+				startPos = positions[1][#positions[1]]
+			end
+
+			-- Draw magenta lines for smooth warp bonus ticks
+			local prevPos = startPos
+			for i, pos in ipairs(smoothWarpPositions) do
+				if prevPos and pos then
+					local prevScreen = client.WorldToScreen(Vector3(prevPos.x, prevPos.y, prevPos.z))
+					local curScreen = client.WorldToScreen(Vector3(pos.x, pos.y, pos.z))
+
+					if prevScreen and curScreen then
+						-- Magenta color for smooth warp bonus (255, 0, 255)
+						draw.Color(255, 0, 255, 200)
+						draw.Line(
+							math.floor(prevScreen[1]),
+							math.floor(prevScreen[2]),
+							math.floor(curScreen[1]),
+							math.floor(curScreen[2])
+						)
+					end
+
+					-- Draw small magenta dot at each bonus tick position
+					local curDot = client.WorldToScreen(Vector3(pos.x, pos.y, pos.z))
+					if curDot then
+						local dx, dy = math.floor(curDot[1]), math.floor(curDot[2])
+						draw.Color(255, 0, 255, 255)
+						draw.FilledRect(dx - 3, dy - 3, dx + 3, dy + 3)
+					end
+				end
+				prevPos = pos
 			end
 		end
 
@@ -2217,6 +2737,11 @@ local function doDraw()
 			TimMenu.NextLine()
 			Menu.Advanced.AdvancedPred = TimMenu.Checkbox("Advanced Pred", Menu.Advanced.AdvancedPred)
 			TimMenu.NextLine()
+			Menu.Advanced.AntiBackstabResolver =
+				TimMenu.Checkbox("Anti-Backstab Resolver (HvH)", Menu.Advanced.AntiBackstabResolver)
+			TimMenu.NextLine()
+			Menu.Advanced.SmoothWarp = TimMenu.Checkbox("Smooth Warp (Experimental)", Menu.Advanced.SmoothWarp)
+			TimMenu.NextLine()
 		end
 
 		if Menu.currentTab == 3 then
@@ -2240,12 +2765,210 @@ local function doDraw()
 	end
 end
 
+--[[ Anti-Backstab Resolver - Force cheaters to look at us with ping compensation ]]
+--
+-- Resolve fake pitch from anti-aim (clamp to valid range)
+local function ResolvePitch(pitch)
+	if pitch > 89 then
+		return 89
+	elseif pitch < -89 then
+		return -89
+	end
+	return pitch
+end
+
+-- Calculate yaw to look from one position to another
+local function LookAtYaw(fromPos, toPos)
+	local delta = toPos - fromPos
+	return math.deg(math.atan(delta.y, delta.x))
+end
+
+-- Get real ping using NetChannel (more accurate than reported ping)
+local function GetRealPing()
+	local netChannel = clientstate.GetNetChannel()
+	if not netChannel then
+		return 0.05 -- Default 50ms if unavailable
+	end
+
+	-- Get average latency from netchannel (incoming + outgoing)
+	-- E_Flows: FLOW_OUTGOING = 0, FLOW_INCOMING = 1
+	local incoming = netChannel:GetAvgLatency(1) or 0 -- FLOW_INCOMING
+	local outgoing = netChannel:GetAvgLatency(0) or 0 -- FLOW_OUTGOING
+	local avgLatency = (incoming + outgoing) / 2
+
+	-- Add 1 tick safety margin (15ms at 66 tick)
+	local safetyMargin = 1 / 66
+
+	-- Clamp to reasonable range (1 tick to 500ms)
+	return math.max(math.min(avgLatency - safetyMargin, 0.5), safetyMargin)
+end
+
+-- Convert ping (seconds) to ticks
+local function PingToTicks(pingSeconds)
+	local tickInterval = globals.TickInterval() or (1 / 66)
+	return math.max(1, math.ceil(pingSeconds / tickInterval))
+end
+
+-- Record local player position for history
+local function RecordPositionHistory(pos)
+	local tickCount = globals.TickCount()
+	local curTime = globals.CurTime()
+
+	-- Add new position
+	table.insert(positionHistory, {
+		tick = tickCount,
+		pos = Vector3(pos.x, pos.y, pos.z), -- Copy vector
+		time = curTime,
+	})
+
+	-- Remove old entries (keep 1 second worth)
+	while #positionHistory > POSITION_HISTORY_SIZE do
+		table.remove(positionHistory, 1)
+	end
+end
+
+-- Get position from history based on ticks ago
+local function GetPositionFromHistory(ticksAgo)
+	if #positionHistory == 0 then
+		return nil
+	end
+
+	local currentTickCount = globals.TickCount()
+	local targetTick = currentTickCount - ticksAgo
+
+	-- Find closest position in history
+	local closestEntry = nil
+	local closestDiff = math.huge
+
+	for _, entry in ipairs(positionHistory) do
+		local diff = math.abs(entry.tick - targetTick)
+		if diff < closestDiff then
+			closestDiff = diff
+			closestEntry = entry
+		end
+	end
+
+	return closestEntry and closestEntry.pos or positionHistory[#positionHistory].pos
+end
+
+-- Smooth angle interpolation for resolver
+local function LerpAngle(from, to, t)
+	-- Normalize angles
+	local diff = to - from
+	while diff > 180 do
+		diff = diff - 360
+	end
+	while diff < -180 do
+		diff = diff + 360
+	end
+	return from + diff * t
+end
+
+-- FrameStageNotify callback - resolves cheater view angles with ping compensation
+local function OnFrameStageNotify(stage)
+	-- Only run on FRAME_NET_UPDATE_END (stage 4) - this is when props are updated
+	if stage ~= E_ClientFrameStage.FRAME_NET_UPDATE_END then
+		return
+	end
+
+	-- Get local player
+	local localPlayer = entities.GetLocalPlayer()
+	if not localPlayer or not localPlayer:IsAlive() then
+		return
+	end
+
+	local localPos = localPlayer:GetAbsOrigin()
+	if not localPos then
+		return
+	end
+
+	-- Record position for history (always do this)
+	RecordPositionHistory(localPos)
+
+	-- Check if resolver feature is enabled
+	if not Menu.Advanced.AntiBackstabResolver then
+		return
+	end
+
+	-- Get our real ping for compensation
+	local myPing = GetRealPing()
+	local myPingTicks = PingToTicks(myPing)
+
+	-- Get all players
+	local allPlayers = entities.FindByClass("CTFPlayer")
+	if not allPlayers then
+		return
+	end
+
+	for _, player in pairs(allPlayers) do
+		if not player or not player:IsValid() then
+			goto continue
+		end
+		if player == localPlayer then
+			goto continue
+		end
+		if not player:IsAlive() or player:IsDormant() then
+			goto continue
+		end
+		if player:GetTeamNumber() == localPlayer:GetTeamNumber() then
+			goto continue
+		end
+
+		-- Get enemy position
+		local playerPos = player:GetAbsOrigin()
+		if not playerPos then
+			goto continue
+		end
+
+		-- Get current network angles
+		local networkAngles = player:GetPropVector("tfnonlocaldata", "m_angEyeAngles[0]")
+		if not networkAngles then
+			goto continue
+		end
+
+		-- Calculate ping-compensated position they would see
+		-- Enemy aimbot sees us where we were (myPingTicks) ago - instant snap, no extrapolation
+		local positionTheySee = GetPositionFromHistory(myPingTicks)
+		if not positionTheySee then
+			positionTheySee = localPos -- Fallback to current
+		end
+
+		-- Perfect aimbot = instant snap to where they see us (no smoothing/interpolation)
+		local resolvedYaw = LookAtYaw(playerPos, positionTheySee)
+
+		-- Normalize yaw to -180 to 180
+		while resolvedYaw > 180 do
+			resolvedYaw = resolvedYaw - 360
+		end
+		while resolvedYaw < -180 do
+			resolvedYaw = resolvedYaw + 360
+		end
+
+		-- Resolve the pitch (fix fake pitch from anti-aim)
+		local resolvedPitch = ResolvePitch(networkAngles.x)
+
+		-- Force their view angles - perfect aimbot snap to our lag-compensated position
+		player:SetPropVector(Vector3(resolvedPitch, resolvedYaw, 0), "tfnonlocaldata", "m_angEyeAngles[0]")
+
+		::continue::
+	end
+end
+
 --[[ Remove the menu when unloaded ]]
 --
 local function OnUnload() -- Called when the script is unloaded
 	UnloadLib() --unloading lualib
 	CreateCFG(string.format([[Lua %s]], Lua__fileName), Menu) --saving the config
 	engine.PlaySound("hl1/fvox/deactivated.wav")
+end
+
+--[[ SendNetMsg callback for smooth warp packet modification ]]
+--
+local function OnSendNetMsg(msg)
+	if not Menu.Main.Active then
+		return
+	end
+	HandleSmoothWarpPacket(msg)
 end
 
 --[[ Unregister previous callbacks ]]
@@ -2255,6 +2978,8 @@ callbacks.Unregister("Unload", "AtSM_Unload") -- Unregister the "Unload" callbac
 callbacks.Unregister("Draw", "AtSM_Draw") -- Unregister the "Draw" callback
 callbacks.Unregister("FireGameEvent", "adaamageLogger")
 callbacks.Unregister("FireGameEvent", "AtSM_KillRecharge")
+callbacks.Unregister("FrameStageNotify", "AtSM_Resolver") -- Unregister resolver callback
+callbacks.Unregister("SendNetMsg", "AtSM_SmoothWarp") -- Unregister smooth warp callback
 
 --[[ Register callbacks ]]
 --
@@ -2263,6 +2988,8 @@ callbacks.Register("Unload", "AtSM_Unload", OnUnload) -- Register the "Unload" c
 callbacks.Register("Draw", "AtSM_Draw", doDraw) -- Register the "Draw" callback
 callbacks.Register("FireGameEvent", "adaamageLogger", damageLogger)
 callbacks.Register("FireGameEvent", "AtSM_KillRecharge", OnKillRecharge) -- Auto recharge on kill
+callbacks.Register("FrameStageNotify", "AtSM_Resolver", OnFrameStageNotify) -- Anti-backstab resolver
+callbacks.Register("SendNetMsg", "AtSM_SmoothWarp", OnSendNetMsg) -- Smooth warp packet handler
 
 --[[ Play sound when loaded ]]
 --
