@@ -5,6 +5,9 @@
 ---@type boolean, lnxLib
 local libLoaded, lnxLib = pcall(require, "lnxLib")
 if not libLoaded then
+	libLoaded, lnxLib = pcall(require, "store.lnxLib")
+end
+if not libLoaded then
 	client.ChatPrintf("\x07FF0000LnxLib failed to load!")
 	engine.PlaySound("common/bugreporter_failed.wav")
 	return
@@ -16,6 +19,9 @@ assert(lnxLib.GetVersion() >= 1.00, "lnxLib version is too old, please update it
 -- TimMenu should not be unloaded as other scripts may be using it
 
 local menuLoaded, TimMenu = pcall(require, "TimMenu")
+if not menuLoaded then
+	menuLoaded, TimMenu = pcall(require, "store.TimMenu")
+end
 if not menuLoaded then
 	client.ChatPrintf("\x07FF0000TimMenu failed to load!")
 	engine.PlaySound("common/bugreporter_failed.wav")
@@ -142,6 +148,10 @@ local MATH = {
 	HALF_CIRCLE = 180,
 	FULL_CIRCLE = 360,
 }
+
+-- TF2 Conditions
+local TFCond_Cloaked = 4
+local TFCond_CloakFlicker = 9
 
 -- Hull dimensions (precomputed)
 local HULL = {
@@ -2302,12 +2312,10 @@ local function OnCreateMove(cmd)
 	end
 
 	local pWeapon = pLocal:GetPropEntity("m_hActiveWeapon")
-	if not pWeapon then
+	if not pWeapon or not pWeapon:IsMeleeWeapon() then
 		return
 	end
-	if pLocal:InCond(4) then
-		return
-	end
+
 	if not IsReadyToAttack(cmd, pWeapon) then
 		return
 	end
